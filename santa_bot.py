@@ -446,9 +446,9 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                                     f"Message:\n```{msg_raw}```"
                                 )                           
                             
-                        except Exception:
-                            delivered = 0
-                            fail_reason = "DM failed (privacy settings / closed DMs)."
+                            except Exception:
+                                delivered = 0
+                                fail_reason = "DM failed (privacy settings / closed DMs)."
 
                         cur.execute("""
                             INSERT INTO santa_deliveries (
