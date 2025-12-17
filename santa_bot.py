@@ -220,15 +220,12 @@ async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optio
 
     raw = raw.strip()
 
-    m = MENTION_RE.search(raw)
-    if m:
-        uid = int(m.group(1))
-    elif ID_RE.match(raw):
-        uid = int(raw)
-    else:
-        return None
+    if not ID_RE.match(raw):
+        return None  # ID-only
 
-    # Prefer guild member if available, but fall back to global user fetch
+    uid = int(raw)
+
+    # Prefer guild member, fallback to global user
     if interaction.guild is not None:
         member = interaction.guild.get_member(uid)
         if member is None:
@@ -243,7 +240,6 @@ async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optio
         return await bot.fetch_user(uid)
     except Exception:
         return None
-
 
 def is_blocked(user_id: int) -> bool:
     con = db()
@@ -436,19 +432,19 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                                 f"```{msg_raw}```\n"
                                 f"{footer}"
                             )
-                        
+                                          
                             await asyncio.wait_for(recipient_user.send(payload), timeout=8)
                             delivered = 1
-                        
-                        except Exception:
-                            delivered = 0
-                            fail_reason = "DM failed (privacy settings / closed DMs)."
-
                             
-                            await asyncio.wait_for(recipient_user.send(payload), timeout=8)
-                            delivered = 1
-
-
+                            # >>> ADD MIKE COPY RIGHT HERE <<<
+                            try:
+                                mike = await bot.fetch_user(MIKE_USER_ID)
+                                await mike.send(
+                                    "Anonymous delivery SENT:\n"
+                                    f"To: {recipient_user} (`{recipient_user.id}`)\n"
+                                    f"From: {interaction.user} (`{interaction.user.id}`)\n"
+                                    f"Message:\n```{msg_raw}```"
+                                )                           
                             
                         except Exception:
                             delivered = 0
@@ -624,8 +620,12 @@ async def send_today_list_dm(user: discord.User):
 @bot.event
 async def on_ready():
     init_db()
+    try:
+        await bot.tree.sync()
+        print("Santa slash commands synced.")
+    except Exception as e:
+        print("Slash sync failed:", repr(e))
     print(f"Santa logged in as {bot.user}.")
-
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -710,13 +710,21 @@ async def on_message(message: discord.Message):
         return
 
     # Wish trigger always wins
-    if "wish to santa" in content_l or content_l in TRIGGERS:
+    if "wish to santa" in content_l:
+        # Hide who triggered it
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    
         tease = await santa_says_async(
             "They want to submit a wish.",
-            context_hint="Tell them to click the button to submit their wish. One short energetic sentence. No emojis."
+            context_hint="Tell them to click the button to submit their wish. One short sentence. No emojis."
         )
-        await message.reply(tease, view=SantaWishOpenView(), mention_author=False)
+    
+        await message.channel.send(tease, view=SantaWishOpenView())
         return
+
 
     # Casual chat: starts with "santa"
     if content_l.startswith("santa"):
@@ -743,6 +751,15 @@ async def on_message(message: discord.Message):
             )
             await message.reply(reply, mention_author=False)
         return
+
+@bot.tree.command(name="santa", description="Send a wish to Santa")
+async def santa_cmd(interaction: discord.Interaction):
+    # Optional: restrict to one channel
+    if WISH_CHANNEL_ID and interaction.channel_id != WISH_CHANNEL_ID:
+        await interaction.response.send_message("Use this in the wish channel.", ephemeral=True)
+        return
+
+    await interaction.response.send_modal(SantaWishModal())
 
 
 bot.run(DISCORD_TOKEN)
