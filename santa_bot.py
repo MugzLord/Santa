@@ -302,28 +302,38 @@ async def on_message(message: discord.Message):
     content = (message.content or "").strip()
     content_l = content.lower()
 
-    # MIKE-only list trigger (no slash command)
-    if message.author.id == MIKE_USER_ID and content_l == LIST_TRIGGER:
+    # 1️⃣ MIKE-only list
+    if message.author.id == MIKE_USER_ID and content_l == "santa list":
         await send_today_list(message.channel)
         return
-        
-    # Reply when mentioned (optional)
+
+    # 2️⃣ WISH TRIGGER — MUST COME FIRST
+    if content_l in TRIGGERS or content_l.startswith("wish to santa"):
+        tease = santa_says(
+            "They want to submit a wish.",
+            context_hint="Tell them to click the button to submit their wish. One short energetic sentence. No emojis."
+        )
+        await message.reply(tease, view=SantaWishOpenView(), mention_author=False)
+        return
+
+    # 3️⃣ SMART CHAT / MENTION REPLY (fallback)
     if bot.user and bot.user.mentioned_in(message):
-        # avoid triggering on @everyone/@here nonsense
         if message.mention_everyone:
             return
 
-    # Remove the mention from the text
-    cleaned = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-    if cleaned:
-        reply = santa_says(
-            cleaned,
-            context_hint="They mentioned you in chat. Reply as Santa in 1–2 sentences, modern British slang, playful, energetic. No emojis."
+        cleaned = (
+            content.replace(f"<@{bot.user.id}>", "")
+                   .replace(f"<@!{bot.user.id}>", "")
+                   .strip()
         )
-        await message.reply(reply, mention_author=False)
-        return
 
-    
+        if cleaned:
+            reply = santa_says(
+                cleaned,
+                context_hint="They spoke to you casually. Reply as Santa in 1–2 sentences, modern British slang, playful."
+            )
+            await message.reply(reply, mention_author=False)
+            return
 
     # Optional: restrict wish trigger to one channel
     if WISH_CHANNEL_ID and message.channel.id != WISH_CHANNEL_ID:
