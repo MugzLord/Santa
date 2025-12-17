@@ -39,7 +39,7 @@ if not MIKE_USER_ID:
 WISH_CHANNEL_ID = int(os.getenv("SANTA_WISH_CHANNEL_ID", "0"))
 
 DB_PATH = os.getenv("SANTA_DB_PATH", "santa.db")
-Europe/London_TZ = ZoneInfo("Europe/London")
+LONDON_TZ = ZoneInfo("Europe/London")
 
 TRIGGERS = {"wish to santa", "dear santa", "santa wish"}
 LIST_TRIGGER = "santa list"   # MIKE only
@@ -116,8 +116,9 @@ def santa_says(user_text: str, context_hint: str = "") -> str:
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def day_key_Europe/London():
-    return datetime.now(ZoneInfo("Europe/Europe/London")).strftime("%Y-%m-%d")
+def day_key_London():
+    return datetime.now(LONDON_TZ).strftime("%Y-%m-%d")
+
 
 
 # =========================
@@ -159,6 +160,13 @@ def init_db():
       delivered INTEGER NOT NULL DEFAULT 0,
       fail_reason TEXT,
       created_at TEXT NOT NULL
+    );
+    """)
+    
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS santa_announcements (
+      day_key TEXT PRIMARY KEY,
+      announced_at TEXT NOT NULL
     );
     """)
 
@@ -244,6 +252,64 @@ def sender_can_send_today(sender_id: int) -> bool:
     row = cur.fetchone()
     con.close()
     return not bool(row)
+async def santa_announce_today(channel: discord.abc.Messageable):
+    dk = day_key_London()
+
+    con = db()
+    cur = con.cursor()
+
+    # Check if already announced
+    cur.execute("SELECT 1 FROM santa_announcements WHERE day_key = ?", (dk,))
+    if cur.fetchone():
+        con.close()
+        await channel.send("Already done. Don’t push it.")
+        return
+
+    # Get today's wishes
+    cur.execute("""
+        SELECT imvu_name
+        FROM santa_wishes
+        WHERE day_key = ?
+    """, (dk,))
+    rows = cur.fetchall()
+
+    if len(rows) < 2:
+        con.close()
+        await channel.send("Not enough wishes today. Behave and try tomorrow.")
+        return
+
+    winners = random.sample(rows, 2)
+    winner_names = [w[0] for w in winners]
+
+    # Mark announced
+    cur.execute("""
+        INSERT INTO santa_announcements (day_key, announced_at)
+        VALUES (?, ?)
+    """, (dk, now_utc_iso()))
+    con.commit()
+    con.close()
+
+    intro = await santa_says_async(
+        "Announce today’s two winners.",
+        context_hint="Announce two winners confidently as Santa. Modern British slang. One sentence. No emojis."
+    )
+
+    lines = "\n".join(
+        f"• **{name}** — 5k credits or part of the wish. Santa decides."
+        for name in winner_names
+    )
+
+    outro = await santa_says_async(
+        "Close the announcement.",
+        context_hint="Short confident closing line as Santa. One sentence. No emojis."
+    )
+
+    await channel.send(
+        f"🎅 **Santa’s Desk — {dk}**\n"
+        f"{intro}\n\n"
+        f"{lines}\n\n"
+        f"{outro}"
+    )
 
 # =========================
 # UI: Wish Modal + Button
@@ -527,6 +593,11 @@ async def on_message(message: discord.Message):
         )
         await message.reply(tease, view=SantaWishOpenView(), mention_author=False)
         return
+
+    if message.author.id == MIKE_USER_ID and content_l == "santa announce":
+    await santa_announce_today(message.channel)
+    return
+
 
     # ----- Casual chat: starts with 'santa' -----
     if content_l.startswith("santa"):
