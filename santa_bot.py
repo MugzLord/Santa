@@ -154,46 +154,60 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        dk = day_key_qatar()
-
-        con = db()
-        cur = con.cursor()
-
-        # One wish per person per day
-        cur.execute("""
-            SELECT id FROM santa_wishes
-            WHERE day_key = ? AND user_id = ?
-            LIMIT 1
-        """, (dk, str(interaction.user.id)))
-        if cur.fetchone():
+        try:
+            # ACK immediately so Discord doesn't error
+            await interaction.response.defer(ephemeral=True, thinking=True)
+    
+            dk = day_key_qatar()
+    
+            con = db()
+            cur = con.cursor()
+    
+            # One wish per person per day
+            cur.execute("""
+                SELECT id FROM santa_wishes
+                WHERE day_key = ? AND user_id = ?
+                LIMIT 1
+            """, (dk, str(interaction.user.id)))
+            if cur.fetchone():
+                con.close()
+                msg = santa_says(
+                    "They tried to submit another wish today.",
+                    context_hint="Tell them they already submitted a wish today. One sentence. Cheeky modern British slang. No emojis."
+                )
+                await interaction.followup.send(msg, ephemeral=True)
+                return
+    
+            cur.execute("""
+                INSERT INTO santa_wishes (day_key, user_id, discord_name, imvu_name, wish_text, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                dk,
+                str(interaction.user.id),
+                str(interaction.user),
+                self.imvu_name.value.strip(),
+                self.wish_text.value.strip(),
+                self.note.value.strip() if self.note.value else None,
+                now_utc_iso()
+            ))
+            con.commit()
             con.close()
-            msg = santa_says(
-                "They tried to submit another wish today.",
-                context_hint="Tell them they already submitted a wish today. One sentence. Cheeky modern British slang. No emojis."
+    
+            santa_reply = santa_says(
+                f"IMVU: {self.imvu_name.value.strip()}\nWish: {self.wish_text.value.strip()}\nNote: {self.note.value.strip() if self.note.value else ''}",
+                context_hint="They just submitted a wish. Reply as Santa in 1–2 sentences, energetic modern British slang, cheeky. No emojis."
             )
-            await interaction.response.send_message(msg, ephemeral=True)
-            return
+    
+            await interaction.followup.send(santa_reply, ephemeral=True)
+    
+        except Exception as e:
+            # Don’t let Discord show “Something went wrong”
+            try:
+                await interaction.followup.send("Nah, that one glitched. Try again in a sec.", ephemeral=True)
+            except Exception:
+                pass
+            print("Santa modal submit error:", repr(e))
 
-        cur.execute("""
-            INSERT INTO santa_wishes (day_key, user_id, discord_name, imvu_name, wish_text, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            dk,
-            str(interaction.user.id),
-            str(interaction.user),
-            self.imvu_name.value.strip(),
-            self.wish_text.value.strip(),
-            self.note.value.strip() if self.note.value else None,
-            now_utc_iso()
-        ))
-        con.commit()
-        con.close()
-
-        santa_reply = santa_says(
-            f"IMVU: {self.imvu_name.value.strip()}\nWish: {self.wish_text.value.strip()}\nNote: {self.note.value.strip() if self.note.value else ''}",
-            context_hint="They just submitted a wish. Reply as Santa in 1–2 sentences, energetic modern British slang, cheeky. No emojis."
-        )
-        await interaction.response.send_message(santa_reply, ephemeral=True)
 
 class SantaWishOpenView(discord.ui.View):
     def __init__(self):
@@ -267,6 +281,24 @@ async def on_message(message: discord.Message):
     if message.author.id == MIKE_USER_ID and content_l == LIST_TRIGGER:
         await send_today_list(message.channel)
         return
+        
+    # Reply when mentioned (optional)
+    if bot.user and bot.user.mentioned_in(message):
+        # avoid triggering on @everyone/@here nonsense
+        if message.mention_everyone:
+            return
+
+    # Remove the mention from the text
+    cleaned = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+    if cleaned:
+        reply = santa_says(
+            cleaned,
+            context_hint="They mentioned you in chat. Reply as Santa in 1–2 sentences, modern British slang, playful, energetic. No emojis."
+        )
+        await message.reply(reply, mention_author=False)
+        return
+
+    
 
     # Optional: restrict wish trigger to one channel
     if WISH_CHANNEL_ID and message.channel.id != WISH_CHANNEL_ID:
