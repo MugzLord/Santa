@@ -4,17 +4,12 @@ import random
 import sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple
+from typing import Optional
 
 import discord
 from discord.ext import commands
 
 import asyncio
-
-async def santa_says_async(user_text: str, context_hint: str = "") -> str:
-    # run the sync OpenAI call off the event loop so Discord interactions don't hang
-    return await asyncio.to_thread(santa_says, user_text, context_hint)
-
 
 # =========================
 # ENV
@@ -30,24 +25,24 @@ if not OPENAI_API_KEY:
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# MIKE only (Discord user ID)
 MIKE_USER_ID = int(os.getenv("MIKE_USER_ID", "0"))
 if not MIKE_USER_ID:
     raise RuntimeError("MIKE_USER_ID env var not set (put your Discord user ID)")
 
-# Optional: restrict wish trigger to one channel (0 = allow anywhere)
 WISH_CHANNEL_ID = int(os.getenv("SANTA_WISH_CHANNEL_ID", "0"))
-
 DB_PATH = os.getenv("SANTA_DB_PATH", "santa.db")
+
 LONDON_TZ = ZoneInfo("Europe/London")
 
 TRIGGERS = {"wish to santa", "dear santa", "santa wish"}
-LIST_TRIGGER = "santa list"   # MIKE only
+LIST_TRIGGER = "santa list"  # MIKE only
+
 
 # =========================
 # OpenAI (Santa voice)
 # =========================
 from openai import OpenAI
+
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 SANTA_SYSTEM_PROMPT = """
@@ -74,6 +69,7 @@ BANNED_PHRASES = [
     "i am an ai", "i'm an ai", "as a bot", "i am a bot", "i'm a bot",
 ]
 
+
 def sanitise_santa(text: str) -> str:
     t = (text or "").strip()
     low = t.lower()
@@ -87,6 +83,7 @@ def sanitise_santa(text: str) -> str:
     if len(t) > 350:
         t = t[:350].rsplit(" ", 1)[0] + "…"
     return t
+
 
 def santa_says(user_text: str, context_hint: str = "") -> str:
     prompt = f"{context_hint}\nUser: {user_text}".strip()
@@ -109,6 +106,12 @@ def santa_says(user_text: str, context_hint: str = "") -> str:
             "Noted. Behave till the results.",
         ])
 
+
+async def santa_says_async(user_text: str, context_hint: str = "") -> str:
+    # run the sync call off the event loop so Discord interactions don't hang
+    return await asyncio.to_thread(santa_says, user_text, context_hint)
+
+
 # =========================
 # Time helpers
 # =========================
@@ -116,9 +119,9 @@ def santa_says(user_text: str, context_hint: str = "") -> str:
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def day_key_London():
-    return datetime.now(LONDON_TZ).strftime("%Y-%m-%d")
 
+def day_key_London() -> str:
+    return datetime.now(LONDON_TZ).strftime("%Y-%m-%d")
 
 
 # =========================
@@ -129,6 +132,7 @@ def db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.execute("PRAGMA journal_mode=WAL;")
     return con
+
 
 def init_db():
     con = db()
@@ -147,7 +151,6 @@ def init_db():
     );
     """)
 
-    # Anonymous deliveries (audit trail)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS santa_deliveries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,7 +165,7 @@ def init_db():
       created_at TEXT NOT NULL
     );
     """)
-    
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS santa_announcements (
       day_key TEXT PRIMARY KEY,
@@ -170,7 +173,6 @@ def init_db():
     );
     """)
 
-    # Recipient opt-out list
     cur.execute("""
     CREATE TABLE IF NOT EXISTS santa_blocks (
       user_id TEXT PRIMARY KEY,
@@ -181,6 +183,7 @@ def init_db():
     con.commit()
     con.close()
 
+
 # =========================
 # Discord bot
 # =========================
@@ -188,9 +191,9 @@ def init_db():
 INTENTS = discord.Intents.default()
 INTENTS.members = True
 INTENTS.message_content = True
-INTENTS.dm_messages = True
 
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
+
 
 # =========================
 # Helpers: resolve recipient
@@ -199,13 +202,8 @@ bot = commands.Bot(command_prefix="!", intents=INTENTS)
 MENTION_RE = re.compile(r"<@!?(\d+)>")
 ID_RE = re.compile(r"^\d{15,21}$")
 
+
 async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optional[discord.User]:
-    """
-    Accepts:
-      - @mention (<@id> / <@!id>)
-      - raw numeric ID
-    Only allows server members (same guild as the interaction).
-    """
     if not raw:
         return None
 
@@ -219,7 +217,6 @@ async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optio
     else:
         return None
 
-    # Must be a member of the guild (server member)
     if interaction.guild is None:
         return None
 
@@ -232,6 +229,7 @@ async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optio
 
     return member
 
+
 def is_blocked(user_id: int) -> bool:
     con = db()
     cur = con.cursor()
@@ -240,8 +238,9 @@ def is_blocked(user_id: int) -> bool:
     con.close()
     return bool(row)
 
+
 def sender_can_send_today(sender_id: int) -> bool:
-    dk = day_key_Europe/London()
+    dk = day_key_London()  # FIXED
     con = db()
     cur = con.cursor()
     cur.execute("""
@@ -252,20 +251,20 @@ def sender_can_send_today(sender_id: int) -> bool:
     row = cur.fetchone()
     con.close()
     return not bool(row)
+
+
 async def santa_announce_today(channel: discord.abc.Messageable):
     dk = day_key_London()
 
     con = db()
     cur = con.cursor()
 
-    # Check if already announced
     cur.execute("SELECT 1 FROM santa_announcements WHERE day_key = ?", (dk,))
     if cur.fetchone():
         con.close()
         await channel.send("Already done. Don’t push it.")
         return
 
-    # Get today's wishes
     cur.execute("""
         SELECT imvu_name
         FROM santa_wishes
@@ -281,7 +280,6 @@ async def santa_announce_today(channel: discord.abc.Messageable):
     winners = random.sample(rows, 2)
     winner_names = [w[0] for w in winners]
 
-    # Mark announced
     cur.execute("""
         INSERT INTO santa_announcements (day_key, announced_at)
         VALUES (?, ?)
@@ -311,6 +309,7 @@ async def santa_announce_today(channel: discord.abc.Messageable):
         f"{outro}"
     )
 
+
 # =========================
 # UI: Wish Modal + Button
 # =========================
@@ -321,6 +320,7 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         placeholder="e.g. MikeyMoon",
         max_length=40
     )
+
     wish_text = discord.ui.TextInput(
         label="Your Wish (PID/link/description)",
         style=discord.TextStyle.paragraph,
@@ -331,7 +331,7 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         label="Recipient (optional) — @mention or ID",
         required=False,
         max_length=80,
-        placeholder="@(discord ID)"
+        placeholder="@Eli or 123456789012345678"
     )
 
     anon_message = discord.ui.TextInput(
@@ -349,17 +349,16 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # ACK immediately so Discord doesn't show modal error
         await interaction.response.defer(ephemeral=True, thinking=True)
-    
-        reply_text = None  # GUARANTEE we always send something
-    
+
+        reply_text = None
+
         try:
             dk = day_key_London()
-    
-            # One wish per person per day
+
             con = db()
             cur = con.cursor()
+
             cur.execute("""
                 SELECT id FROM santa_wishes
                 WHERE day_key = ? AND user_id = ?
@@ -373,8 +372,7 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                 )
                 reply_text = msg
                 return
-    
-            # Save wish
+
             cur.execute("""
                 INSERT INTO santa_wishes (day_key, user_id, discord_name, imvu_name, wish_text, note, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -388,14 +386,12 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                 now_utc_iso()
             ))
             con.commit()
-    
-            # Optional anonymous delivery
+
             delivery_result_line = ""
             rec_raw = (self.recipient.value or "").strip()
             msg_raw = (self.anon_message.value or "").strip()
-    
+
             if rec_raw and msg_raw:
-                # Rate-limit: 1 anon delivery per sender per day
                 if not sender_can_send_today(interaction.user.id):
                     delivery_result_line = "You’ve already sent your anonymous note today. Don’t get greedy."
                 else:
@@ -418,15 +414,12 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                                 )
                             )
                             footer = "If you want no more anonymous notes, reply: STOP"
-    
-                            # Put a timeout on DM send so we don't hang forever
                             await asyncio.wait_for(recipient_user.send(f"{dm_text}\n\n{footer}"), timeout=8)
                             delivered = 1
                         except Exception:
                             delivered = 0
                             fail_reason = "DM failed (privacy settings / closed DMs)."
-    
-                        # Audit record
+
                         cur.execute("""
                             INSERT INTO santa_deliveries (
                               day_key, sender_id, sender_name,
@@ -445,25 +438,27 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                             now_utc_iso()
                         ))
                         con.commit()
-    
-                        delivery_result_line = "Alright. Delivered. Don’t make it weird." if delivered else "Tried to deliver it. Their DMs are locked."
-    
+
+                        delivery_result_line = (
+                            "Alright. Delivered. Don’t make it weird."
+                            if delivered else
+                            "Tried to deliver it. Their DMs are locked."
+                        )
+
             con.close()
-    
-            # Santa reply to the sender (ephemeral)
+
             base_reply = await santa_says_async(
                 f"IMVU: {self.imvu_name.value.strip()}\nWish: {self.wish_text.value.strip()}\nNote: {self.note.value.strip() if self.note.value else ''}",
                 context_hint="They just submitted a wish. Reply as Santa in 1–2 sentences, energetic modern British slang, cheeky. No emojis."
             )
-    
+
             reply_text = f"{base_reply}\n\n{delivery_result_line}" if delivery_result_line else base_reply
-    
+
         except Exception as e:
             print("Santa modal submit error:", repr(e))
             reply_text = "Nah, that one glitched. Try again in a sec."
-    
+
         finally:
-            # ALWAYS end the interaction; never leave it "thinking..."
             if reply_text is None:
                 reply_text = "Alright. Done."
             try:
@@ -480,12 +475,14 @@ class SantaWishOpenView(discord.ui.View):
     async def open_form(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SantaWishModal())
 
+
 # =========================
 # MIKE-only: DM wish list + deliveries
 # =========================
 
 async def send_today_list_dm(user: discord.User):
-    dk = day_key_Europe/London()
+    dk = day_key_London()  # FIXED
+
     con = db()
     cur = con.cursor()
 
@@ -538,18 +535,14 @@ async def send_today_list_dm(user: discord.User):
         parts.append("\n**Anonymous Deliveries**\nNone today.")
 
     text = "\n\n".join(parts)
-    # Split if too long for one DM
     if len(text) <= 3800:
         await user.send(text)
     else:
-        # crude split
-        chunks = []
         while text:
             chunk = text[:3800]
             text = text[3800:]
-            chunks.append(chunk)
-        for c in chunks:
-            await user.send(c)
+            await user.send(chunk)
+
 
 # =========================
 # Events
@@ -560,6 +553,7 @@ async def on_ready():
     init_db()
     print(f"Santa logged in as {bot.user}.")
 
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -568,25 +562,44 @@ async def on_message(message: discord.Message):
     content = (message.content or "").strip()
     content_l = content.lower()
 
-    # ----- MIKE-only list (DM only) -----
-    if message.author.id == MIKE_USER_ID and content_l == "santa list":
+    # DM opt-out: user DMs Santa "STOP"
+    if isinstance(message.channel, discord.DMChannel):
+        if content_l == "stop":
+            con = db()
+            cur = con.cursor()
+            cur.execute("""
+                INSERT OR REPLACE INTO santa_blocks (user_id, blocked_at)
+                VALUES (?, ?)
+            """, (str(message.author.id), now_utc_iso()))
+            con.commit()
+            con.close()
+
+            reply = santa_says(
+                "They opted out.",
+                context_hint="Confirm they've opted out. One sentence. Modern British slang. No emojis."
+            )
+            await message.reply(reply)
+        return
+
+    # MIKE-only list (DM only)
+    if message.author.id == MIKE_USER_ID and content_l == LIST_TRIGGER:
         try:
             await send_today_list_dm(message.author)
         except Exception:
             await message.reply("Couldn’t DM you. Turn on DMs for this server and try again.", mention_author=False)
         return
 
-    # ----- Optional: restrict wishing to one channel -----
+    # MIKE-only announce (Option A) — put BEFORE channel restriction so it works anywhere
+    if message.author.id == MIKE_USER_ID and content_l == "santa announce":
+        await santa_announce_today(message.channel)
+        return
+
+    # Optional restrict wishing to one channel
     if WISH_CHANNEL_ID and message.channel.id != WISH_CHANNEL_ID:
         return
 
-    # ----- WISH TRIGGER MUST WIN (even if they mention @Santa etc.) -----
-    # This catches:
-    # "wish to santa"
-    # "wish to santa @Santa"
-    # "@Santa wish to santa"
-    # "wish to santa\n@Santa"
-    if "wish to santa" in content_l:
+    # Wish trigger always wins
+    if "wish to santa" in content_l or content_l in TRIGGERS:
         tease = await santa_says_async(
             "They want to submit a wish.",
             context_hint="Tell them to click the button to submit their wish. One short energetic sentence. No emojis."
@@ -594,12 +607,7 @@ async def on_message(message: discord.Message):
         await message.reply(tease, view=SantaWishOpenView(), mention_author=False)
         return
 
-    if message.author.id == MIKE_USER_ID and content_l == "santa announce":
-        await santa_announce_today(message.channel)
-        return
-
-
-    # ----- Casual chat: starts with 'santa' -----
+    # Casual chat: starts with "santa"
     if content_l.startswith("santa"):
         reply = await santa_says_async(
             content,
@@ -608,7 +616,7 @@ async def on_message(message: discord.Message):
         await message.reply(reply, mention_author=False)
         return
 
-    # ----- Reply when mentioned -----
+    # Reply when mentioned
     if bot.user and bot.user.mentioned_in(message):
         if message.mention_everyone:
             return
@@ -625,8 +633,5 @@ async def on_message(message: discord.Message):
             await message.reply(reply, mention_author=False)
         return
 
-# =========================
-# Run
-# =========================
 
 bot.run(DISCORD_TOKEN)
