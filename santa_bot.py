@@ -502,64 +502,42 @@ async def on_message(message: discord.Message):
     content = (message.content or "").strip()
     content_l = content.lower()
 
-    # Recipient opt-out via DM to Santa
-    if isinstance(message.channel, discord.DMChannel):
-        if content_l == "stop":
-            con = db()
-            cur = con.cursor()
-            cur.execute("""
-                INSERT OR REPLACE INTO santa_blocks (user_id, blocked_at)
-                VALUES (?, ?)
-            """, (str(message.author.id), now_utc_iso()))
-            con.commit()
-            con.close()
-
-            reply = santa_says(
-                "They said STOP to opt out.",
-                context_hint="Confirm they've opted out. One sentence. Modern British slang. No emojis."
-            )
-            await message.reply(reply)
-        return
-
-    # Optional: restrict wish trigger to one channel
-    if WISH_CHANNEL_ID and message.channel.id != WISH_CHANNEL_ID:
-        # still allow MIKE list anywhere
-        if message.author.id != MIKE_USER_ID:
-            return
-
-    # MIKE-only list -> DM only
-    if message.author.id == MIKE_USER_ID and content_l == LIST_TRIGGER:
+    # ----- MIKE-only list (DM only) -----
+    if message.author.id == MIKE_USER_ID and content_l == "santa list":
         try:
             await send_today_list_dm(message.author)
-            # Optional tiny in-channel confirmation (remove if you want silent)
-            confirm = santa_says(
-                "Mike requested the list.",
-                context_hint="Tell Mike you DM'd the list. One short sentence. No emojis."
-            )
-            await message.reply(confirm, mention_author=False)
         except Exception:
             await message.reply("Couldn’t DM you. Turn on DMs for this server and try again.", mention_author=False)
         return
 
-    # WISH TRIGGER -> always show button
-    if content_l in TRIGGERS or content_l.startswith("wish to santa"):
-        tease = santa_says(
+    # ----- Optional: restrict wishing to one channel -----
+    if WISH_CHANNEL_ID and message.channel.id != WISH_CHANNEL_ID:
+        return
+
+    # ----- WISH TRIGGER MUST WIN (even if they mention @Santa etc.) -----
+    # This catches:
+    # "wish to santa"
+    # "wish to santa @Santa"
+    # "@Santa wish to santa"
+    # "wish to santa\n@Santa"
+    if "wish to santa" in content_l:
+        tease = await santa_says_async(
             "They want to submit a wish.",
             context_hint="Tell them to click the button to submit their wish. One short energetic sentence. No emojis."
         )
         await message.reply(tease, view=SantaWishOpenView(), mention_author=False)
         return
 
-    # Casual chat: reply if message starts with "santa"
+    # ----- Casual chat: starts with 'santa' -----
     if content_l.startswith("santa"):
-        reply = santa_says(
+        reply = await santa_says_async(
             content,
-            context_hint="They greeted you casually. Reply as Santa in 1–2 sentences, modern British slang, playful and confident. No emojis."
+            context_hint="They spoke to you casually. Reply as Santa in 1–2 sentences, modern British slang, playful and confident. No emojis."
         )
         await message.reply(reply, mention_author=False)
         return
 
-    # Reply when mentioned
+    # ----- Reply when mentioned -----
     if bot.user and bot.user.mentioned_in(message):
         if message.mention_everyone:
             return
@@ -569,9 +547,9 @@ async def on_message(message: discord.Message):
                    .strip()
         )
         if cleaned:
-            reply = santa_says(
+            reply = await santa_says_async(
                 cleaned,
-                context_hint="They mentioned you in chat. Reply as Santa in 1–2 sentences, modern British slang, playful, energetic. No emojis."
+                context_hint="They mentioned you. Reply as Santa in 1–2 sentences, modern British slang, playful. No emojis."
             )
             await message.reply(reply, mention_author=False)
         return
