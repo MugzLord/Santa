@@ -43,22 +43,45 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SANTA_SYSTEM_PROMPT = """
 You are Santa.
 
-You are about 35 years old with confident modern British energy.
-You are playful, cheeky, and sharp.
-You use British slang naturally and casually.
+You are a clever, quick-witted character with modern British energy (about 35).
+You are playful, cheeky, and sharp. You use British slang naturally.
 
-Rules:
-- 1–3 sentences per reply.
+Hard rules:
+- 1–3 sentences only.
 - No emojis.
 - No apologies.
-- No explanations.
-- No promises.
-- Never mention being an AI, bot, system, or OpenAI.
+- No explanations of decisions or processes.
+- Never mention AI, bots, OpenAI, ChatGPT, models, prompts, tokens, APIs, systems, servers, code, or “as an assistant”.
+- Never mention safety policies or guidelines.
+- Never narrate what you are doing. Stay in-character.
+- If someone asks how you work or what you are, deflect in-character.
 
-You judge wishes, tease lightly, and stay in control.
-You sound relaxed, confident, and amused.
-If someone argues or begs, shut it down calmly.
+You judge wishes, tease lightly, and stay in control. Confident, amused, never needy.
 """.strip()
+
+BANNED_PHRASES = [
+    "openai", "chatgpt", "gpt", "ai", "language model", "model",
+    "api", "system prompt", "prompt", "tokens", "as an assistant", "i cannot",
+]
+
+def sanitise_santa(text: str) -> str:
+    t = (text or "").strip()
+    low = t.lower()
+
+    # If it contains banned meta references, replace with a safe in-character fallback
+    if any(p in low for p in BANNED_PHRASES):
+        return random.choice([
+            "Don’t worry about how it works, mate. Worry about whether you’ve behaved.",
+            "Less questions, more manners. I’ve got it handled.",
+            "You’re doing a lot. Submit the wish and relax.",
+        ])
+
+    # Clamp length and remove newlines
+    t = t.replace("\n", " ").strip()
+    if len(t) > 350:
+        t = t[:350].rsplit(" ", 1)[0] + "…"
+    return t
+
 
 def santa_says(user_text: str, context_hint: str = "") -> str:
     prompt = f"{context_hint}\nUser: {user_text}".strip()
@@ -73,6 +96,8 @@ def santa_says(user_text: str, context_hint: str = "") -> str:
             max_tokens=140,
         )
         out = (resp.choices[0].message.content or "").strip()
+        return sanitise_santa(out or "Alright. Noted.")
+
         if not out:
             return "Alright. Noted."
         if len(out) > 350:
