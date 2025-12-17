@@ -258,7 +258,7 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         label="Recipient (optional) — @mention or ID",
         required=False,
         max_length=80,
-        placeholder="@Eli or 123456789012345678"
+        placeholder="@(discord ID)"
     )
 
     anon_message = discord.ui.TextInput(
