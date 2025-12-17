@@ -67,18 +67,29 @@ BANNED_PHRASES = [
     "openai", "chatgpt", "gpt", "ai", "language model", "model",
     "api", "system prompt", "prompt", "tokens", "as an assistant",
     "i am an ai", "i'm an ai", "as a bot", "i am a bot", "i'm a bot",
+    "oi", "careful now", "alright, love", "love", "darling", "sweetheart", "mate"
 ]
 
 
 def sanitise_santa(text: str) -> str:
     t = (text or "").strip()
     low = t.lower()
+
     if any(p in low for p in BANNED_PHRASES):
         return random.choice([
-            "Don’t worry about the details, mate. Worry about your manners.",
-            "Less questions, more behaviour. I’ve got it handled.",
-            "You’re doing a lot. Submit the wish and relax.",
+            "Don’t worry about the details. Put the wish in and behave.",
+            "Skip the interrogation. Put the wish through.",
+            "Less analysis. More wishing.",
         ])
+
+    if any(p in low for p in BANNED_STYLE_PHRASES):
+        # Re-roll with a clean, neutral British tone (no “oi/mate/love” etc.)
+        return random.choice([
+            "Easy. Put your wish in properly and we’ll talk.",
+            "Steady. Submit the wish and stop performing.",
+            "Bold. I’ll allow it—now do it properly.",
+        ])
+
     t = t.replace("\n", " ").strip()
     if len(t) > 350:
         t = t[:350].rsplit(" ", 1)[0] + "…"
@@ -416,16 +427,29 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                         delivered = 0
                         fail_reason = None
                         try:
-                            dm_text = await santa_says_async(
-                                msg_raw,
+                            intro = await santa_says_async(
+                                f"Deliver an anonymous message to {recipient_user.display_name}.",
                                 context_hint=(
-                                    "Deliver this message as Santa. Keep it short, playful British slang, 1–2 sentences. "
-                                    "Do not reveal the sender. No emojis. Don't mention rules."
+                                    "Write ONE short intro line addressed to the recipient by name. "
+                                    "Say they've received an anonymous message. Keep it clear and playful. "
+                                    "No emojis. Do NOT reveal the sender. Do NOT rewrite the message."
                                 )
                             )
+                            
                             footer = "If you want no more anonymous notes, reply: STOP"
-                            await asyncio.wait_for(recipient_user.send(f"{dm_text}\n\n{footer}"), timeout=8)
+                            
+                            payload = (
+                                f"{intro}\n\n"
+                                f"Anonymous message:\n"
+                                f"```{msg_raw}```\n"
+                                f"{footer}"
+                            )
+                            
+                            await asyncio.wait_for(recipient_user.send(payload), timeout=8)
                             delivered = 1
+
+
+                            
                         except Exception:
                             delivered = 0
                             fail_reason = "DM failed (privacy settings / closed DMs)."
@@ -455,6 +479,40 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                             "Tried to deliver it. Their DMs are locked."
                         )
 
+                        # --- DM MIKE a private log of the wish ---
+                        try:
+                            mike = await bot.fetch_user(MIKE_USER_ID)
+                        
+                            imvu = self.imvu_name.value.strip()
+                            wish = self.wish_text.value.strip()
+                            note = (self.note.value or "").strip()
+                        
+                            rec = (self.recipient.value or "").strip()
+                            anon = (self.anon_message.value or "").strip()
+                        
+                            lines = [
+                                f"**New Santa Wish — {dk}**",
+                                f"From: **{interaction.user}** (`{interaction.user.id}`)",
+                                f"IMVU: **{imvu}**",
+                                f"Wish: {wish}",
+                            ]
+                        
+                            if note:
+                                lines.append(f"Note: {note}")
+                        
+                            if rec and anon:
+                                lines.append("")
+                                lines.append("**Anonymous delivery requested**")
+                                lines.append(f"Recipient input: `{rec}`")
+                                lines.append(f"Message:\n```{anon}```")
+                                if delivery_result_line:
+                                    lines.append(f"Status: {delivery_result_line}")
+                        
+                            await mike.send("\n".join(lines))
+                        
+                        except Exception as e:
+                            print("Santa DM-to-Mike failed:", repr(e))
+
             con.close()
 
             base_reply = await santa_says_async(
@@ -483,8 +541,14 @@ class SantaWishOpenView(discord.ui.View):
 
     @discord.ui.button(label="Open Santa Wish Form", style=discord.ButtonStyle.primary)
     async def open_form(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(SantaWishModal())
+        # Delete the entire message (text + button)
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass  # ignore if missing permissions
 
+        # Open the modal
+        await interaction.response.send_modal(SantaWishModal())
 
 # =========================
 # MIKE-only: DM wish list + deliveries
