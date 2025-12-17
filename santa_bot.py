@@ -366,7 +366,12 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     )
 
 async def on_submit(self, interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except TypeError:
+        # fallback for libs that don't support ephemeral kwarg here
+        await interaction.response.defer()
+
 
     reply_text = None
 
@@ -532,10 +537,12 @@ async def on_submit(self, interaction: discord.Interaction):
     finally:
         if reply_text is None:
             reply_text = "Alright. Done."
+        
         try:
             await interaction.followup.send(reply_text, ephemeral=True)
-        except Exception as e:
-            print("Santa followup failed:", repr(e))
+        except TypeError:
+            await interaction.followup.send(reply_text)
+
 
 class SantaWishOpenView(discord.ui.View):
     def __init__(self):
