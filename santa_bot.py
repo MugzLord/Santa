@@ -285,6 +285,46 @@ async def send_today_list(channel: discord.abc.Messageable):
     )
     await channel.send(f"**Today’s Wishes — {dk}**\n{header}\n\n{text}")
 
+async def send_today_list_dm(user: discord.User):
+    dk = day_key_qatar()
+
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+        SELECT imvu_name, wish_text
+        FROM santa_wishes
+        WHERE day_key = ?
+        ORDER BY id DESC
+    """, (dk,))
+    rows = cur.fetchall()
+    con.close()
+
+    if not rows:
+        msg = santa_says(
+            "No wishes were submitted today.",
+            context_hint="Tell Mike there are no wishes today. One short sentence. No emojis."
+        )
+        await user.send(msg)
+        return
+
+    lines = []
+    for idx, (imvu, wish) in enumerate(rows, start=1):
+        wish_one = (wish or "").replace("\n", " ").strip()
+        if len(wish_one) > 140:
+            wish_one = wish_one[:140].rsplit(" ", 1)[0] + "…"
+        lines.append(f"{idx}. **{imvu}** — {wish_one}")
+
+    text = "\n".join(lines)
+    if len(text) > 3500:
+        text = text[:3500].rsplit("\n", 1)[0] + "\n…"
+
+    header = santa_says(
+        "Mike asked for today's wish list.",
+        context_hint="Write a short energetic header as Santa introducing today's wish list. One sentence. No emojis."
+    )
+
+    await user.send(f"**Today’s Wishes — {dk}**\n{header}\n\n{text}")
+
 # =========================
 # Events
 # =========================
@@ -302,10 +342,20 @@ async def on_message(message: discord.Message):
     content = (message.content or "").strip()
     content_l = content.lower()
 
-    # 1️⃣ MIKE-only list
     if message.author.id == MIKE_USER_ID and content_l == "santa list":
-        await send_today_list(message.channel)
+        await send_today_list_dm(message.author)   # DM only
         return
+
+
+    # Casual greeting trigger (no mention needed)
+    if content_l.startswith("santa"):
+        reply = santa_says(
+            content,
+            context_hint="They greeted you casually. Reply as Santa in 1–2 sentences, modern British slang, playful and confident. No emojis."
+        )
+        await message.reply(reply, mention_author=False)
+        return
+
 
     # 2️⃣ WISH TRIGGER — MUST COME FIRST
     if content_l in TRIGGERS or content_l.startswith("wish to santa"):
