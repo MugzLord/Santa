@@ -543,7 +543,6 @@ async def send_today_list_dm(user: discord.User):
             text = text[3800:]
             await user.send(chunk)
 
-
 # =========================
 # Events
 # =========================
