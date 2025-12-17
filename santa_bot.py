@@ -595,8 +595,8 @@ async def on_message(message: discord.Message):
         return
 
     if message.author.id == MIKE_USER_ID and content_l == "santa announce":
-    await santa_announce_today(message.channel)
-    return
+        await santa_announce_today(message.channel)
+        return
 
 
     # ----- Casual chat: starts with 'santa' -----
