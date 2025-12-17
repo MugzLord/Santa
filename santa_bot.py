@@ -9,6 +9,13 @@ from typing import Optional, Tuple
 import discord
 from discord.ext import commands
 
+import asyncio
+
+async def santa_says_async(user_text: str, context_hint: str = "") -> str:
+    # run the sync OpenAI call off the event loop so Discord interactions don't hang
+    return await asyncio.to_thread(santa_says, user_text, context_hint)
+
+
 # =========================
 # ENV
 # =========================
@@ -32,7 +39,7 @@ if not MIKE_USER_ID:
 WISH_CHANNEL_ID = int(os.getenv("SANTA_WISH_CHANNEL_ID", "0"))
 
 DB_PATH = os.getenv("SANTA_DB_PATH", "santa.db")
-QATAR_TZ = ZoneInfo("Asia/Qatar")
+Europe/London_TZ = ZoneInfo("Europe/London")
 
 TRIGGERS = {"wish to santa", "dear santa", "santa wish"}
 LIST_TRIGGER = "santa list"   # MIKE only
@@ -109,9 +116,9 @@ def santa_says(user_text: str, context_hint: str = "") -> str:
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def day_key_qatar(dt: Optional[datetime] = None) -> str:
-    dt = dt or datetime.now(QATAR_TZ)
-    return dt.strftime("%Y-%m-%d")
+def day_key_Europe/London():
+    return datetime.now(ZoneInfo("Europe/Europe/London")).strftime("%Y-%m-%d")
+
 
 # =========================
 # DB
@@ -226,7 +233,7 @@ def is_blocked(user_id: int) -> bool:
     return bool(row)
 
 def sender_can_send_today(sender_id: int) -> bool:
-    dk = day_key_qatar()
+    dk = day_key_Europe/London()
     con = db()
     cur = con.cursor()
     cur.execute("""
@@ -276,10 +283,13 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # ACK immediately so Discord doesn't show modal error
-        await interaction.response.defer(ephemeral=True, thinking=True)
+    # ACK immediately so Discord doesn't show modal error
+    await interaction.response.defer(ephemeral=True, thinking=True)
 
-        dk = day_key_qatar()
+    reply_text = None  # GUARANTEE we always send something
+
+    try:
+        dk = day_key_London()
 
         # One wish per person per day
         con = db()
@@ -291,11 +301,11 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         """, (dk, str(interaction.user.id)))
         if cur.fetchone():
             con.close()
-            msg = santa_says(
+            msg = await santa_says_async(
                 "They tried to submit another wish today.",
                 context_hint="Tell them they already submitted a wish today. One sentence. Cheeky modern British slang. No emojis."
             )
-            await interaction.followup.send(msg, ephemeral=True)
+            reply_text = msg
             return
 
         # Save wish
@@ -331,11 +341,10 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                 elif is_blocked(recipient_user.id):
                     delivery_result_line = "That person’s opted out. Leave it."
                 else:
-                    # Attempt DM
                     delivered = 0
                     fail_reason = None
                     try:
-                        dm_text = santa_says(
+                        dm_text = await santa_says_async(
                             msg_raw,
                             context_hint=(
                                 "Deliver this message as Santa. Keep it short, playful British slang, 1–2 sentences. "
@@ -343,9 +352,11 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                             )
                         )
                         footer = "If you want no more anonymous notes, reply: STOP"
-                        await recipient_user.send(f"{dm_text}\n\n{footer}")
+
+                        # Put a timeout on DM send so we don't hang forever
+                        await asyncio.wait_for(recipient_user.send(f"{dm_text}\n\n{footer}"), timeout=8)
                         delivered = 1
-                    except Exception as e:
+                    except Exception:
                         delivered = 0
                         fail_reason = "DM failed (privacy settings / closed DMs)."
 
@@ -369,23 +380,31 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                     ))
                     con.commit()
 
-                    if delivered:
-                        delivery_result_line = "Alright. Delivered. Don’t make it weird."
-                    else:
-                        delivery_result_line = "Tried to deliver it. Their DMs are locked."
+                    delivery_result_line = "Alright. Delivered. Don’t make it weird." if delivered else "Tried to deliver it. Their DMs are locked."
 
         con.close()
 
         # Santa reply to the sender (ephemeral)
-        base_reply = santa_says(
+        base_reply = await santa_says_async(
             f"IMVU: {self.imvu_name.value.strip()}\nWish: {self.wish_text.value.strip()}\nNote: {self.note.value.strip() if self.note.value else ''}",
             context_hint="They just submitted a wish. Reply as Santa in 1–2 sentences, energetic modern British slang, cheeky. No emojis."
         )
 
-        if delivery_result_line:
-            await interaction.followup.send(f"{base_reply}\n\n{delivery_result_line}", ephemeral=True)
-        else:
-            await interaction.followup.send(base_reply, ephemeral=True)
+        reply_text = f"{base_reply}\n\n{delivery_result_line}" if delivery_result_line else base_reply
+
+    except Exception as e:
+        print("Santa modal submit error:", repr(e))
+        reply_text = "Nah, that one glitched. Try again in a sec."
+
+    finally:
+        # ALWAYS end the interaction; never leave it "thinking..."
+        if reply_text is None:
+            reply_text = "Alright. Done."
+        try:
+            await interaction.followup.send(reply_text, ephemeral=True)
+        except Exception as e:
+            print("Santa followup failed:", repr(e))
+
 
 class SantaWishOpenView(discord.ui.View):
     def __init__(self):
@@ -400,7 +419,7 @@ class SantaWishOpenView(discord.ui.View):
 # =========================
 
 async def send_today_list_dm(user: discord.User):
-    dk = day_key_qatar()
+    dk = day_key_Europe/London()
     con = db()
     cur = con.cursor()
 
