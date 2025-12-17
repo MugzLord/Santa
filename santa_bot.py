@@ -217,17 +217,21 @@ async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optio
     else:
         return None
 
-    if interaction.guild is None:
+    # Prefer guild member if available, but fall back to global user fetch
+    if interaction.guild is not None:
+        member = interaction.guild.get_member(uid)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(uid)
+            except Exception:
+                member = None
+        if member is not None:
+            return member
+
+    try:
+        return await bot.fetch_user(uid)
+    except Exception:
         return None
-
-    member = interaction.guild.get_member(uid)
-    if member is None:
-        try:
-            member = await interaction.guild.fetch_member(uid)
-        except Exception:
-            return None
-
-    return member
 
 
 def is_blocked(user_id: int) -> bool:
@@ -309,6 +313,12 @@ async def santa_announce_today(channel: discord.abc.Messageable):
         f"{outro}"
     )
 
+async def delete_if_possible(message: discord.Message):
+    try:
+        await message.delete()
+    except Exception:
+        # Missing permissions or not allowed in that channel
+        pass
 
 # =========================
 # UI: Wish Modal + Button
@@ -581,12 +591,50 @@ async def on_message(message: discord.Message):
         return
 
     # MIKE-only list (DM only)
-    if message.author.id == MIKE_USER_ID and content_l == LIST_TRIGGER:
+    if message.author.id == MIKE_USER_ID and content_l == "santa list":
+        await delete_if_possible(message)
         try:
             await send_today_list_dm(message.author)
         except Exception:
-            await message.reply("Couldn’t DM you. Turn on DMs for this server and try again.", mention_author=False)
+            try:
+                await message.author.send("Couldn’t pull the list. Check DB path / permissions and try again.")
+            except Exception:
+                pass
         return
+
+    if message.author.id == MIKE_USER_ID and content_l.startswith("santa pick"):
+        await delete_if_possible(message)
+        parts = content_l.split()
+        if len(parts) != 4:
+            await message.author.send("Use: `santa pick 3 7`")
+            return
+        try:
+            p1 = int(parts[2]); p2 = int(parts[3])
+        except ValueError:
+            await message.author.send("Use numbers: `santa pick 3 7`")
+            return
+    
+        dk, wishes = get_today_wishes()
+        if len(wishes) < 2:
+            await message.author.send("Not enough wishes today to pick 2 winners.")
+            return
+        if p1 == p2 or p1 < 1 or p2 < 1 or p1 > len(wishes) or p2 > len(wishes):
+            await message.author.send("Those pick numbers aren’t valid. Check `santa list` and try again.")
+            return
+    
+        save_today_picks(p1, p2)
+        await message.author.send(f"Locked. Picks are **#{p1}** and **#{p2}**. Then run: `santa announce`.")
+        return
+        
+    if message.author.id == MIKE_USER_ID and content_l == "santa announce":
+        await delete_if_possible(message)
+        try:
+            await message.author.send("Alright. I’ll post it in 5 minutes. Don’t hover.")
+        except Exception:
+            pass
+        asyncio.create_task(santa_announce_today_after_delay(message.channel, delay_seconds=300))
+        return
+
 
     # MIKE-only announce (Option A) — put BEFORE channel restriction so it works anywhere
     if message.author.id == MIKE_USER_ID and content_l == "santa announce":
