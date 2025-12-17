@@ -349,127 +349,127 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-    # ACK immediately so Discord doesn't show modal error
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    reply_text = None  # GUARANTEE we always send something
-
-    try:
-        dk = day_key_London()
-
-        # One wish per person per day
-        con = db()
-        cur = con.cursor()
-        cur.execute("""
-            SELECT id FROM santa_wishes
-            WHERE day_key = ? AND user_id = ?
-            LIMIT 1
-        """, (dk, str(interaction.user.id)))
-        if cur.fetchone():
-            con.close()
-            msg = await santa_says_async(
-                "They tried to submit another wish today.",
-                context_hint="Tell them they already submitted a wish today. One sentence. Cheeky modern British slang. No emojis."
-            )
-            reply_text = msg
-            return
-
-        # Save wish
-        cur.execute("""
-            INSERT INTO santa_wishes (day_key, user_id, discord_name, imvu_name, wish_text, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            dk,
-            str(interaction.user.id),
-            str(interaction.user),
-            self.imvu_name.value.strip(),
-            self.wish_text.value.strip(),
-            self.note.value.strip() if self.note.value else None,
-            now_utc_iso()
-        ))
-        con.commit()
-
-        # Optional anonymous delivery
-        delivery_result_line = ""
-        rec_raw = (self.recipient.value or "").strip()
-        msg_raw = (self.anon_message.value or "").strip()
-
-        if rec_raw and msg_raw:
-            # Rate-limit: 1 anon delivery per sender per day
-            if not sender_can_send_today(interaction.user.id):
-                delivery_result_line = "You’ve already sent your anonymous note today. Don’t get greedy."
-            else:
-                recipient_user = await resolve_recipient(interaction, rec_raw)
-                if not recipient_user:
-                    delivery_result_line = "That recipient isn’t valid. Use an @mention or a proper ID."
-                elif recipient_user.id == interaction.user.id:
-                    delivery_result_line = "Sending yourself anonymous notes is unhinged. Try again."
-                elif is_blocked(recipient_user.id):
-                    delivery_result_line = "That person’s opted out. Leave it."
-                else:
-                    delivered = 0
-                    fail_reason = None
-                    try:
-                        dm_text = await santa_says_async(
-                            msg_raw,
-                            context_hint=(
-                                "Deliver this message as Santa. Keep it short, playful British slang, 1–2 sentences. "
-                                "Do not reveal the sender. No emojis. Don't mention rules."
-                            )
-                        )
-                        footer = "If you want no more anonymous notes, reply: STOP"
-
-                        # Put a timeout on DM send so we don't hang forever
-                        await asyncio.wait_for(recipient_user.send(f"{dm_text}\n\n{footer}"), timeout=8)
-                        delivered = 1
-                    except Exception:
-                        delivered = 0
-                        fail_reason = "DM failed (privacy settings / closed DMs)."
-
-                    # Audit record
-                    cur.execute("""
-                        INSERT INTO santa_deliveries (
-                          day_key, sender_id, sender_name,
-                          recipient_id, recipient_name,
-                          message_text, delivered, fail_reason, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        dk,
-                        str(interaction.user.id),
-                        str(interaction.user),
-                        str(recipient_user.id),
-                        str(recipient_user),
-                        msg_raw,
-                        delivered,
-                        fail_reason,
-                        now_utc_iso()
-                    ))
-                    con.commit()
-
-                    delivery_result_line = "Alright. Delivered. Don’t make it weird." if delivered else "Tried to deliver it. Their DMs are locked."
-
-        con.close()
-
-        # Santa reply to the sender (ephemeral)
-        base_reply = await santa_says_async(
-            f"IMVU: {self.imvu_name.value.strip()}\nWish: {self.wish_text.value.strip()}\nNote: {self.note.value.strip() if self.note.value else ''}",
-            context_hint="They just submitted a wish. Reply as Santa in 1–2 sentences, energetic modern British slang, cheeky. No emojis."
-        )
-
-        reply_text = f"{base_reply}\n\n{delivery_result_line}" if delivery_result_line else base_reply
-
-    except Exception as e:
-        print("Santa modal submit error:", repr(e))
-        reply_text = "Nah, that one glitched. Try again in a sec."
-
-    finally:
-        # ALWAYS end the interaction; never leave it "thinking..."
-        if reply_text is None:
-            reply_text = "Alright. Done."
+        # ACK immediately so Discord doesn't show modal error
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    
+        reply_text = None  # GUARANTEE we always send something
+    
         try:
-            await interaction.followup.send(reply_text, ephemeral=True)
+            dk = day_key_London()
+    
+            # One wish per person per day
+            con = db()
+            cur = con.cursor()
+            cur.execute("""
+                SELECT id FROM santa_wishes
+                WHERE day_key = ? AND user_id = ?
+                LIMIT 1
+            """, (dk, str(interaction.user.id)))
+            if cur.fetchone():
+                con.close()
+                msg = await santa_says_async(
+                    "They tried to submit another wish today.",
+                    context_hint="Tell them they already submitted a wish today. One sentence. Cheeky modern British slang. No emojis."
+                )
+                reply_text = msg
+                return
+    
+            # Save wish
+            cur.execute("""
+                INSERT INTO santa_wishes (day_key, user_id, discord_name, imvu_name, wish_text, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                dk,
+                str(interaction.user.id),
+                str(interaction.user),
+                self.imvu_name.value.strip(),
+                self.wish_text.value.strip(),
+                self.note.value.strip() if self.note.value else None,
+                now_utc_iso()
+            ))
+            con.commit()
+    
+            # Optional anonymous delivery
+            delivery_result_line = ""
+            rec_raw = (self.recipient.value or "").strip()
+            msg_raw = (self.anon_message.value or "").strip()
+    
+            if rec_raw and msg_raw:
+                # Rate-limit: 1 anon delivery per sender per day
+                if not sender_can_send_today(interaction.user.id):
+                    delivery_result_line = "You’ve already sent your anonymous note today. Don’t get greedy."
+                else:
+                    recipient_user = await resolve_recipient(interaction, rec_raw)
+                    if not recipient_user:
+                        delivery_result_line = "That recipient isn’t valid. Use an @mention or a proper ID."
+                    elif recipient_user.id == interaction.user.id:
+                        delivery_result_line = "Sending yourself anonymous notes is unhinged. Try again."
+                    elif is_blocked(recipient_user.id):
+                        delivery_result_line = "That person’s opted out. Leave it."
+                    else:
+                        delivered = 0
+                        fail_reason = None
+                        try:
+                            dm_text = await santa_says_async(
+                                msg_raw,
+                                context_hint=(
+                                    "Deliver this message as Santa. Keep it short, playful British slang, 1–2 sentences. "
+                                    "Do not reveal the sender. No emojis. Don't mention rules."
+                                )
+                            )
+                            footer = "If you want no more anonymous notes, reply: STOP"
+    
+                            # Put a timeout on DM send so we don't hang forever
+                            await asyncio.wait_for(recipient_user.send(f"{dm_text}\n\n{footer}"), timeout=8)
+                            delivered = 1
+                        except Exception:
+                            delivered = 0
+                            fail_reason = "DM failed (privacy settings / closed DMs)."
+    
+                        # Audit record
+                        cur.execute("""
+                            INSERT INTO santa_deliveries (
+                              day_key, sender_id, sender_name,
+                              recipient_id, recipient_name,
+                              message_text, delivered, fail_reason, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            dk,
+                            str(interaction.user.id),
+                            str(interaction.user),
+                            str(recipient_user.id),
+                            str(recipient_user),
+                            msg_raw,
+                            delivered,
+                            fail_reason,
+                            now_utc_iso()
+                        ))
+                        con.commit()
+    
+                        delivery_result_line = "Alright. Delivered. Don’t make it weird." if delivered else "Tried to deliver it. Their DMs are locked."
+    
+            con.close()
+    
+            # Santa reply to the sender (ephemeral)
+            base_reply = await santa_says_async(
+                f"IMVU: {self.imvu_name.value.strip()}\nWish: {self.wish_text.value.strip()}\nNote: {self.note.value.strip() if self.note.value else ''}",
+                context_hint="They just submitted a wish. Reply as Santa in 1–2 sentences, energetic modern British slang, cheeky. No emojis."
+            )
+    
+            reply_text = f"{base_reply}\n\n{delivery_result_line}" if delivery_result_line else base_reply
+    
         except Exception as e:
-            print("Santa followup failed:", repr(e))
+            print("Santa modal submit error:", repr(e))
+            reply_text = "Nah, that one glitched. Try again in a sec."
+    
+        finally:
+            # ALWAYS end the interaction; never leave it "thinking..."
+            if reply_text is None:
+                reply_text = "Alright. Done."
+            try:
+                await interaction.followup.send(reply_text, ephemeral=True)
+            except Exception as e:
+                print("Santa followup failed:", repr(e))
 
 
 class SantaWishOpenView(discord.ui.View):
