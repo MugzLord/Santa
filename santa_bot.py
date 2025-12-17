@@ -426,24 +426,24 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                     else:
                         delivered = 0
                         fail_reason = None
+                       
                         try:
-                            intro = await santa_says_async(
-                                f"Deliver an anonymous message to {recipient_user.display_name}.",
-                                context_hint=(
-                                    "Write ONE short intro line addressed to the recipient by name. "
-                                    "Say they've received an anonymous message. Keep it clear and playful. "
-                                    "No emojis. Do NOT reveal the sender. Do NOT rewrite the message."
-                                )
-                            )
-                            
                             footer = "If you want no more anonymous notes, reply: STOP"
-                            
+                        
                             payload = (
-                                f"{intro}\n\n"
+                                f"{recipient_user.display_name}, you’ve received an anonymous message from someone.\n\n"
                                 f"Anonymous message:\n"
                                 f"```{msg_raw}```\n"
                                 f"{footer}"
                             )
+                        
+                            await asyncio.wait_for(recipient_user.send(payload), timeout=8)
+                            delivered = 1
+                        
+                        except Exception:
+                            delivered = 0
+                            fail_reason = "DM failed (privacy settings / closed DMs)."
+
                             
                             await asyncio.wait_for(recipient_user.send(payload), timeout=8)
                             delivered = 1
