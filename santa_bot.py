@@ -397,7 +397,6 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     note = discord.ui.TextInput(
         label="Message to Santa (optional)",
         required=False,
-        max_length=120,
         style=discord.TextStyle.paragraph,
         max_length=600,
         placeholder="If i win, send my winnings to (IMVU Username) anonymously",
