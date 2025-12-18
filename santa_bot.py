@@ -8,6 +8,8 @@ from typing import Optional
 
 import discord
 from discord.ext import commands
+from discord import app_commands
+
 
 import asyncio
 
@@ -142,6 +144,8 @@ def sanitise_santa(text: str) -> str:
         t = t[:350].rsplit(" ", 1)[0] + "…"
     return t
 
+def mike_only(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == MIKE_USER_ID
 
 
 def santa_says(user_text: str, context_hint: str = "") -> str:
@@ -589,7 +593,7 @@ class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Sant
             except Exception:
                 pass
 
-            reply_text = "Alright. Delivered. Don’t make it weird." if delivered else "Tried to deliver it. Their DMs are locked."
+            reply_text = "Delivered as requested." if delivered else "Tried to deliver it. Their DMs are locked."
 
         except Exception as e:
             print("Santa anon modal error:", repr(e))
@@ -955,6 +959,55 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
         f"{lines}\n\n"
         f"{outro}"
     )
+@tree.command(name="pick", description="Pick winner(s) (Mike only)")
+@app_commands.describe(count="How many winners to pick", public="Announce publicly in the wish channel?")
+async def pick(interaction: discord.Interaction, count: int = 1, public: bool = False):
+    if not mike_only(interaction):
+        return await interaction.response.send_message("Nope. Mike only.", ephemeral=True)
+
+    if count < 1:
+        return await interaction.response.send_message("Count must be 1 or more.", ephemeral=True)
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+
+    # ---- CHANGE THIS QUERY to match your actual entries table/columns ----
+    # Expected: one row per entry with at least a user id / username field.
+    cur.execute("SELECT DISTINCT user_id, imvu_username FROM wish_entries")
+    rows = cur.fetchall()
+    con.close()
+
+    if not rows:
+        return await interaction.response.send_message("No entries found to pick from.", ephemeral=True)
+
+    if count > len(rows):
+        count = len(rows)
+
+    winners = random.sample(rows, k=count)
+    winners_text = "\n".join([f"- <@{uid}> — **{name}**" for uid, name in winners])
+
+    await interaction.response.send_message(
+        f"Picked **{count}** winner(s):\n{winners_text}",
+        ephemeral=True
+    )
+
+    if public:
+        ch = bot.get_channel(WISH_CHANNEL_ID)
+        if ch:
+            await ch.send(f"🎅 **Santa Results**\n{winners_text}")
+            
+@tree.command(name="santa_announce", description="Post a Santa announcement (Mike only)")
+@app_commands.describe(message="Announcement text to post")
+async def santa_announce(interaction: discord.Interaction, message: str):
+    if not mike_only(interaction):
+        return await interaction.response.send_message("Nope. Mike only.", ephemeral=True)
+
+    ch = bot.get_channel(WISH_CHANNEL_ID)
+    if not ch:
+        return await interaction.response.send_message("Wish channel not found. Check WISH_CHANNEL_ID.", ephemeral=True)
+
+    await ch.send(f"🎅 **Santa Announcement**\n{message}")
+    await interaction.response.send_message("Posted.", ephemeral=True)
 
 @bot.tree.command(name="santa", description="Santa: wish entries or anonymous messages")
 async def santa_cmd(interaction: discord.Interaction):
