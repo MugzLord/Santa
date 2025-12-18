@@ -214,32 +214,43 @@ MENTION_RE = re.compile(r"<@!?(\d+)>")
 ID_RE = re.compile(r"^\d{15,21}$")
 
 
-async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optional[discord.User]:
-    if not raw:
+async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optional[discord.Member]:
+    if not raw or interaction.guild is None:
         return None
 
     raw = raw.strip()
 
-    if not ID_RE.match(raw):
-        return None  # ID-only
-
-    uid = int(raw)
-
-    # Prefer guild member, fallback to global user
-    if interaction.guild is not None:
+    # mention
+    m = MENTION_RE.search(raw)
+    if m:
+        uid = int(m.group(1))
         member = interaction.guild.get_member(uid)
-        if member is None:
-            try:
-                member = await interaction.guild.fetch_member(uid)
-            except Exception:
-                member = None
-        if member is not None:
+        if member:
+            return member
+        try:
+            return await interaction.guild.fetch_member(uid)
+        except Exception:
+            return None
+
+    # numeric ID
+    if ID_RE.match(raw):
+        uid = int(raw)
+        member = interaction.guild.get_member(uid)
+        if member:
+            return member
+        try:
+            return await interaction.guild.fetch_member(uid)
+        except Exception:
+            return None
+
+    # NOTE: requires Members intent + member cache to be populated
+    raw_l = raw.lower()
+    for member in interaction.guild.members:
+        if (member.name or "").lower() == raw_l:
             return member
 
-    try:
-        return await bot.fetch_user(uid)
-    except Exception:
-        return None
+    return None
+
 
 def is_blocked(user_id: int) -> bool:
     con = db()
@@ -333,7 +344,7 @@ async def delete_if_possible(message: discord.Message):
 
 class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     imvu_name = discord.ui.TextInput(
-        label="IMVU Username",
+        label="Your IMVU Username",
         placeholder="e.g. MikeyMoon",
         max_length=40
     )
@@ -344,25 +355,28 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         max_length=500
     )
 
-    recipient = discord.ui.TextInput(
-        label="Recipient (optional) — @mention or ID",
-        required=False,
-        max_length=80,
-        placeholder="Discord ID or Username "
-    )
-
     anon_message = discord.ui.TextInput(
         label="Anonymous message to deliver (optional)",
         required=False,
         style=discord.TextStyle.paragraph,
         max_length=600,
-        placeholder="What do you want Santa to deliver?"
+        placeholder="What message do you want Santa to deliver?"
     )
-
+    
+    recipient = discord.ui.TextInput(
+        label="Recipient (optional) — @mention or ID",
+        required=False,
+        max_length=80,
+        placeholder="username OR 123456789012345678"
+    )
+    
     note = discord.ui.TextInput(
         label="Message to Santa (optional)",
         required=False,
         max_length=120
+        style=discord.TextStyle.paragraph,
+        max_length=600,
+        placeholder="If i win, send my winnings to (IMVU Username) anonymously",
     )
 
 async def on_submit(self, interaction: discord.Interaction):
