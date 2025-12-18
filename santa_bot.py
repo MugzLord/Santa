@@ -960,54 +960,98 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
         f"{outro}"
     )
 @bot.tree.command(name="pick", description="Pick winner(s) (Mike only)")
-@app_commands.describe(count="How many winners to pick", public="Announce publicly in the wish channel?")
+@app_commands.describe(count="How many winners to pick", public="Announce publicly in the wish channel and reset wishes?")
 async def pick(interaction: discord.Interaction, count: int = 1, public: bool = False):
-    if not mike_only(interaction):
-        return await interaction.response.send_message("Nope. Mike only.", ephemeral=True)
+    if interaction.user.id != MIKE_USER_ID:
+        return await interaction.response.send_message("Mike only.", ephemeral=True)
 
-    if count < 1:
-        return await interaction.response.send_message("Count must be 1 or more.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
 
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
 
-    # ---- CHANGE THIS QUERY to match your actual entries table/columns ----
-    # Expected: one row per entry with at least a user id / username field.
-    cur.execute("SELECT user_id, imvu_name FROM santa_wishes")
-    rows = cur.fetchall()
+    cur.execute("SELECT user_id, imvu_name, wish_text FROM santa_wishes")
+    all_wishes = cur.fetchall()
+
+    if not all_wishes:
+        con.close()
+        return await interaction.followup.send("No wishes found to pick from.", ephemeral=True)
+
+    # unique users for winners
+    pool_map = {}
+    for uid, imvu, _wish in all_wishes:
+        if uid not in pool_map:
+            pool_map[uid] = (imvu or "Unknown")
+
+    pool = [(uid, imvu) for uid, imvu in pool_map.items()]
+    if count > len(pool):
+        count = len(pool)
+
+    winners = random.sample(pool, k=count)
+    winners_text = "\n".join([f"- <@{uid}> — **{imvu}**" for uid, imvu in winners])
+
+    wish_lines = []
+    for _uid, imvu, wish in all_wishes:
+        imvu = imvu or "Unknown"
+        wish = (wish or "").strip() or "—"
+        wish_lines.append(f"- **{imvu}**: {wish}")
+
+    def _chunk_lines(lines, header, limit=1900):
+        chunks, buf = [], header + "\n"
+        for line in lines:
+            if len(buf) + len(line) + 1 > limit:
+                chunks.append(buf.rstrip())
+                buf = header + "\n" + line + "\n"
+            else:
+                buf += line + "\n"
+        if buf.strip():
+            chunks.append(buf.rstrip())
+        return chunks
+
+    wishlist_chunks = _chunk_lines(wish_lines, "🎁 **Santa’s Wish List (this round)**")
+
+    # ✅ HERE is the public switch
+    if public:
+        ch = bot.get_channel(WISH_CHANNEL_ID)
+        if not ch:
+            con.close()
+            return await interaction.followup.send("Wish channel not found (WISH_CHANNEL_ID). Not resetting.", ephemeral=True)
+
+        await ch.send(f"🎅 **Ho ho ho! Santa’s Winners Pick**\n{winners_text}")
+        for chunk in wishlist_chunks:
+            await ch.send(chunk)
+
+        # reset AFTER successful posting
+        cur.execute("DELETE FROM santa_wishes")
+        con.commit()
+        con.close()
+
+        return await interaction.followup.send("Publicly announced winners + wish list, then reset wishes.", ephemeral=True)
+
+    # private preview (no reset)
     con.close()
-
-    if not rows:
-        return await interaction.response.send_message("No entries found to pick from.", ephemeral=True)
-
-    if count > len(rows):
-        count = len(rows)
-
-    winners = random.sample(rows, k=count)
-    winners_text = "\n".join([f"- <@{uid}> — **{name}**" for uid, name in winners])
-
-    await interaction.response.send_message(
-        f"Picked **{count}** winner(s):\n{winners_text}",
+    await interaction.followup.send(
+        f"PRIVATE PREVIEW (not posted)\n\n🎅 Results:\n{winners_text}\n\n{wishlist_chunks[0]}",
         ephemeral=True
     )
 
-    if public:
-        ch = bot.get_channel(WISH_CHANNEL_ID)
-        if ch:
-            await ch.send(f"🎅 **Santa Results**\n{winners_text}")
             
 @bot.tree.command(name="santa_announce", description="Post a Santa announcement (Mike only)")
 @app_commands.describe(message="Announcement text to post")
 async def santa_announce(interaction: discord.Interaction, message: str):
-    if not mike_only(interaction):
-        return await interaction.response.send_message("Nope. Mike only.", ephemeral=True)
+    if interaction.user.id != MIKE_USER_ID:
+        return await interaction.response.send_message("Mike only.", ephemeral=True)
 
-    ch = bot.get_channel(WISH_CHANNEL_ID)
-    if not ch:
-        return await interaction.response.send_message("Wish channel not found. Check WISH_CHANNEL_ID.", ephemeral=True)
+    # Acknowledge immediately so Discord doesn't time out
+    await interaction.response.send_message("Queued. I’ll post this in 3 minutes.", ephemeral=True)
 
-    await ch.send(f"🎅 **Santa Announcement**\n{message}")
-    await interaction.response.send_message("Posted.", ephemeral=True)
+    async def _post_later():
+        await asyncio.sleep(180)  # 3 minutes
+        ch = bot.get_channel(WISH_CHANNEL_ID)
+        if ch:
+            await ch.send(f"🎅 **Ho ho ho Santa Announcement!**\n{message}")
+
+    asyncio.create_task(_post_later())
 
 @bot.tree.command(name="santa", description="Santa: wish entries or anonymous messages")
 async def santa_cmd(interaction: discord.Interaction):
