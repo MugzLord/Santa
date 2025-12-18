@@ -959,7 +959,7 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
         f"{lines}\n\n"
         f"{outro}"
     )
-@tree.command(name="pick", description="Pick winner(s) (Mike only)")
+@bot.tree.command(name="pick", description="Pick winner(s) (Mike only)")
 @app_commands.describe(count="How many winners to pick", public="Announce publicly in the wish channel?")
 async def pick(interaction: discord.Interaction, count: int = 1, public: bool = False):
     if not mike_only(interaction):
