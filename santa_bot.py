@@ -959,6 +959,62 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
         f"{lines}\n\n"
         f"{outro}"
     )
+
+def make_ai_reveal_and_banter(imvu_names: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Returns (reveal_lines[4], banter_lines[len(imvu_names)]).
+    Falls back to hardcoded lines if OpenAI is unavailable/errors.
+    """
+    fallback_reveal = [
+        "Drum roll…",
+        "Ladies and gentlemen…",
+        "Our lucky winner for today… is…",
+        "…",
+    ]
+    fallback_banter = [
+        "Santa saw that wishlist. Bold choices. Respect.",
+        "Congratulations. Now behave before Santa changes his mind.",
+        "Try not to faint. Breathe. Carry on.",
+        "A win is a win. Even if you were lurking.",
+    ]
+
+    if not oa:
+        return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
+
+    n = len(imvu_names)
+
+    instructions = (
+        "You are Santa's announcer for a Discord server. "
+        "Write short, punchy, festive lines. No swearing. "
+        "No numbering, no quotes, no markdown."
+    )
+
+    prompt = (
+        f"Create exactly {4 + n} lines.\n"
+        f"Lines 1-4: suspense/reveal build-up (one line each).\n"
+        f"Lines 5-{4 + n}: one short banter line for each winner (one per winner), "
+        f"to be appended after the winner name.\n"
+        f"Winners IMVU names (order matters): {', '.join(imvu_names)}"
+    )
+
+    resp = oa.responses.create(
+        model=OPENAI_MODEL,
+        reasoning={"effort": "low"},
+        instructions=instructions,
+        input=prompt,
+        max_output_tokens=250,
+    )
+    text = (resp.output_text or "").strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    if len(lines) < (4 + n):
+        return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
+
+    reveal = lines[:4]
+    banter = lines[4:4 + n]
+    return reveal, banter
+
+
 @bot.tree.command(name="pick", description="Pick winner(s) (Mike only)")
 @app_commands.describe(count="How many winners to pick", public="Announce publicly in the wish channel and reset wishes?")
 async def pick(interaction: discord.Interaction, count: int = 1, public: bool = False):
@@ -1012,21 +1068,49 @@ async def pick(interaction: discord.Interaction, count: int = 1, public: bool = 
 
     # ✅ HERE is the public switch
     if public:
-        ch = bot.get_channel(WISH_CHANNEL_ID)
-        if not ch:
+        await interaction.followup.send("Queued. Santa will announce in 3 minutes.", ephemeral=True)
+    
+        # close the current DB connection before the delayed task runs
+        try:
             con.close()
-            return await interaction.followup.send("Wish channel not found (WISH_CHANNEL_ID). Not resetting.", ephemeral=True)
-
-        await ch.send(f"🎅 **Ho ho ho! Santa’s Winners Pick**\n{winners_text}")
-        for chunk in wishlist_chunks:
-            await ch.send(chunk)
-
-        # reset AFTER successful posting
-        cur.execute("DELETE FROM santa_wishes")
-        con.commit()
-        con.close()
-
-        return await interaction.followup.send("Publicly announced winners + wish list, then reset wishes.", ephemeral=True)
+        except Exception:
+            pass
+    
+        async def _announce_pick():
+            await asyncio.sleep(180)  # 3 minutes
+    
+            ch = bot.get_channel(WISH_CHANNEL_ID)
+            if not ch:
+                return
+    
+            # OpenAI-generated staged reveal + winner banter
+            imvu_names = [(imvu or "Unknown") for (_uid, imvu) in winners]
+            reveal_lines, banter_lines = await asyncio.to_thread(make_ai_reveal_and_banter, imvu_names)
+    
+            for line in reveal_lines:
+                await ch.send(line)
+                await asyncio.sleep(3)
+    
+            for i, (uid, imvu) in enumerate(winners):
+                imvu = imvu or "Unknown"
+                await ch.send(f"<@{uid}> — **{imvu}**. {banter_lines[i]}")
+                await asyncio.sleep(2)
+    
+            # wishlist after
+            await asyncio.sleep(2)
+            for chunk in wishlist_chunks:
+                await ch.send(chunk)
+                await asyncio.sleep(1)
+    
+            # reset AFTER successful posting
+            con2 = sqlite3.connect(DB_PATH)
+            cur2 = con2.cursor()
+            cur2.execute("DELETE FROM santa_wishes")
+            con2.commit()
+            con2.close()
+    
+        asyncio.create_task(_announce_pick())
+        return
 
     # private preview (no reset)
     con.close()
