@@ -996,7 +996,7 @@ async def pick(interaction: discord.Interaction, count: int = 1, public: bool = 
         if ch:
             await ch.send(f"🎅 **Santa Results**\n{winners_text}")
             
-@tree.command(name="santa_announce", description="Post a Santa announcement (Mike only)")
+@bot.tree.command(name="santa_announce", description="Post a Santa announcement (Mike only)")
 @app_commands.describe(message="Announcement text to post")
 async def santa_announce(interaction: discord.Interaction, message: str):
     if not mike_only(interaction):
