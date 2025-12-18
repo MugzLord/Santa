@@ -403,11 +403,10 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     )
 
 async def on_submit(self, interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(ephemeral=True)
-    except TypeError:
-        # fallback for libs that don't support ephemeral kwarg here
-        await interaction.response.defer()
+    await interaction.response.send_message(
+        "Santa’s reading that…",
+        ephemeral=True
+    )
 
 
     reply_text = None
@@ -576,7 +575,7 @@ async def on_submit(self, interaction: discord.Interaction):
             reply_text = "Alright. Done."
         
         try:
-            await interaction.followup.send(reply_text, ephemeral=True)
+            await interaction.edit_original_response(content=reply_text)
         except TypeError:
             await interaction.followup.send(reply_text)
 
