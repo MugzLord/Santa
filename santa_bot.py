@@ -51,8 +51,16 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SANTA_SYSTEM_PROMPT = """
 You are Santa.
 
+Tone: cheeky, playful, lightly sarcastic British banter. NEVER rude or scolding.
+Output rules:
+- EXACTLY 1 line.
+- 4–10 words max.
+- No emojis.
+- No questions.
+- No lecturing (avoid: "bad attitude", "behave yourself").
+- Keep it festive; "stocking", "wish", or "list" is welcome but not required.
 You are 35, sharp, funny, cheeky, and full of modern British energy.
-You roast lightly, flirt back if they flirt (PG-13), and keep it festive.
+You roast lightly, flirt back if they flirt, and keep it festive.
 You are confident and playful — never needy, never mean, never creepy.
 You naturally know that winners are picked every day until Christmas Day.
 You mention this casually in conversation when it fits — never as an announcement.
@@ -961,22 +969,22 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
     )
 
 def make_ai_reveal_and_banter(imvu_names: list[str]) -> tuple[list[str], list[str]]:
-    """
-    Returns (reveal_lines[4], banter_lines[len(imvu_names)]).
-    Falls back to hardcoded lines if OpenAI is unavailable/errors.
-    """
     fallback_reveal = [
         "Drum roll…",
-        "Ladies and gentlemen…",
-        "Our lucky winner for today… is…",
+        "Alright then…",
+        "Today’s winner is…",
         "…",
     ]
     fallback_banter = [
-        "Santa saw that wishlist. Bold choices. Respect.",
-        "Congratulations. Now behave before Santa changes his mind.",
-        "Try not to faint. Breathe. Carry on.",
-        "A win is a win. Even if you were lurking.",
+        "Santa approves. Barely.",
+        "Enjoy it. Quietly.",
+        "Don’t spend it all at once.",
+        "Behave. It’s Christmas.",
     ]
+
+    def _clip(s: str, max_len: int = 60) -> str:
+        s = (s or "").strip()
+        return (s[: max_len - 1] + "…") if len(s) > max_len else s
 
     if not oa:
         return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
@@ -984,36 +992,42 @@ def make_ai_reveal_and_banter(imvu_names: list[str]) -> tuple[list[str], list[st
     n = len(imvu_names)
 
     instructions = (
-        "You are Santa's announcer for a Discord server. "
-        "Write short, punchy, festive lines. No swearing. "
-        "No numbering, no quotes, no markdown."
+        "Write very short Discord one-liners. British, festive, light banter.\n"
+        "Hard rules:\n"
+        f"- Output EXACTLY {4 + n} lines.\n"
+        "- Each line MAX 6 words.\n"
+        "- No emojis, no numbering, no quotes, no markdown.\n"
+        "- Lines 1-4: suspense build-up.\n"
+        "- Remaining lines: banter to append after each winner name.\n"
     )
 
-    prompt = (
-        f"Create exactly {4 + n} lines.\n"
-        f"Lines 1-4: suspense/reveal build-up (one line each).\n"
-        f"Lines 5-{4 + n}: one short banter line for each winner (one per winner), "
-        f"to be appended after the winner name.\n"
-        f"Winners IMVU names (order matters): {', '.join(imvu_names)}"
-    )
+    prompt = "Winners (order matters): " + ", ".join(imvu_names)
 
-    resp = oa.responses.create(
-        model=OPENAI_MODEL,
-        reasoning={"effort": "low"},
-        instructions=instructions,
-        input=prompt,
-        max_output_tokens=250,
-    )
-    text = (resp.output_text or "").strip()
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    try:
+        resp = oa.responses.create(
+            model=OPENAI_MODEL,
+            reasoning={"effort": "low"},
+            instructions=instructions,
+            input=prompt,
+            max_output_tokens=120,
+        )
+        text = (resp.output_text or "").strip()
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    if len(lines) < (4 + n):
+        # Enforce exact count + shortness
+        need = 4 + n
+        if len(lines) < need:
+            return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
+
+        lines = lines[:need]
+        lines = [_clip(x, 60) for x in lines]
+
+        reveal = lines[:4]
+        banter = lines[4:4 + n]
+        return reveal, banter
+
+    except Exception:
         return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
-
-    reveal = lines[:4]
-    banter = lines[4:4 + n]
-    return reveal, banter
-
 
 @bot.tree.command(name="pick", description="Pick winner(s) (Mike only)")
 @app_commands.describe(count="How many winners to pick", public="Announce publicly in the wish channel and reset wishes?")
@@ -1132,10 +1146,34 @@ async def santa_announce(interaction: discord.Interaction, message: str):
     async def _post_later():
         await asyncio.sleep(180)  # 3 minutes
         ch = bot.get_channel(WISH_CHANNEL_ID)
-        if ch:
-            await ch.send(f"🎅 **Ho ho ho Santa Announcement!**\n{message}")
-
-    asyncio.create_task(_post_later())
+        if not ch:
+            return
+    
+        # staged reveal (one line at a time)
+        pre = [
+            "Right then… gather round.",
+            "Drum roll, please…",
+            "Ladies and gentlemen…",
+            "Santa’s got news…",
+            "…",
+        ]
+        for line in pre:
+            await ch.send(line)
+            await asyncio.sleep(2)
+    
+        # banter + the actual announcement message you entered
+        banter = [
+            "Try not to start a riot in chat.",
+            "No pushing. No crying. Minimal chaos, please.",
+            "If you’re lurking, at least lurk politely.",
+            "Behave. It’s Christmas.",
+        ]
+    
+        await ch.send(f"🎅 **Ho ho ho! Santa Announcement!**")
+        await asyncio.sleep(1)
+        await ch.send(f"{message}")
+        await asyncio.sleep(1)
+        await ch.send(random.choice(banter))
 
 @bot.tree.command(name="santa", description="Santa: wish entries or anonymous messages")
 async def santa_cmd(interaction: discord.Interaction):
