@@ -734,8 +734,17 @@ class SantaAnonPickRecipientView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
 
-    @discord.ui.user_select(placeholder="Pick who gets the anonymous message…", min_values=1, max_values=1)
-    async def pick(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        select = discord.ui.UserSelect(
+            placeholder="Pick who gets the anonymous message…",
+            min_values=1,
+            max_values=1
+        )
+        select.callback = self.pick_callback
+        self.add_item(select)
+
+    async def pick_callback(self, interaction: discord.Interaction):
+        # the first component in this view is the UserSelect we added
+        select: discord.ui.UserSelect = self.children[0]
         recipient = select.values[0]
         await interaction.response.send_modal(SantaAnonModal(recipient.id))
 
