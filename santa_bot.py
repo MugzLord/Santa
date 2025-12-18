@@ -326,13 +326,12 @@ def sender_can_send_today(sender_id: int) -> bool:
     con = db()
     cur = con.cursor()
     cur.execute("""
-        SELECT 1 FROM santa_deliveries
+        SELECT COUNT(1) FROM santa_deliveries
         WHERE day_key = ? AND sender_id = ?
-        LIMIT 1
     """, (dk, str(sender_id)))
-    row = cur.fetchone()
+    count = cur.fetchone()[0] or 0
     con.close()
-    return not bool(row)
+    return count < 10
 
 
 async def santa_announce_today(channel: discord.abc.Messageable):
@@ -1035,6 +1034,14 @@ async def santa_cmd(interaction: discord.Interaction):
     if WISH_CHANNEL_ID and interaction.channel_id != WISH_CHANNEL_ID:
         await interaction.response.send_message("Use this in the wish channel.", ephemeral=True)
         return
+
+    # Respond immediately (prevents "did not respond")
+    await interaction.response.send_message(
+        "Alright. Pick your chaos.",
+        view=SantaMainMenu(),
+        ephemeral=True
+    )
+
 
 
 bot.run(DISCORD_TOKEN)
