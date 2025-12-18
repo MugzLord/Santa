@@ -37,6 +37,7 @@ LONDON_TZ = ZoneInfo("Europe/London")
 TRIGGERS = {"wish to santa", "dear santa", "santa wish"}
 LIST_TRIGGER = "santa list"  # MIKE only
 
+GUILD_ID = int(os.getenv("SANTA_GUILD_ID", "0"))
 
 # =========================
 # OpenAI (Santa voice)
@@ -837,15 +838,19 @@ async def send_today_list_dm(user: discord.User):
 @bot.event
 async def on_ready():
     init_db()
-
     try:
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        print("Slash commands cleared and re-synced.")
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print("Santa guild slash commands synced.")
+        else:
+            await bot.tree.sync()
+            print("Santa global slash commands synced.")
     except Exception as e:
         print("Slash sync failed:", repr(e))
 
-    print(f"Santa logged in as {bot.user}.")
+    print(f"Santa logged in as {bot.user} (app id: {bot.application_id}).")
 
 
 @bot.event
