@@ -423,14 +423,14 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         max_length=600,
         placeholder="What message do you want Santa to deliver?"
     )
-    
+
     recipient = discord.ui.TextInput(
         label="Recipient (optional) — @mention or ID",
         required=False,
         max_length=80,
         placeholder="username OR 123456789012345678"
     )
-    
+
     note = discord.ui.TextInput(
         label="Message to Santa (optional)",
         required=False,
@@ -440,10 +440,8 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "Santa’s reading that…",
-            ephemeral=True
-        )
+        # ALWAYS ACK fast to avoid the modal red error
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         reply_text = None
 
@@ -510,17 +508,14 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                                 f"{footer}"
                             )
 
-                            await asyncio.wait_for(
-                                recipient_user.send(payload),
-                                timeout=8
-                            )
+                            await asyncio.wait_for(recipient_user.send(payload), timeout=8)
                             delivered = 1
 
                         except Exception:
                             delivered = 0
                             fail_reason = "DM failed (privacy settings / closed DMs)."
 
-                        # >>> ADD MIKE COPY RIGHT HERE <<<
+                        # >>> MIKE COPY <<<
                         try:
                             mike = await bot.fetch_user(MIKE_USER_ID)
                             await mike.send(
@@ -557,40 +552,6 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
                             "Tried to deliver it. Their DMs are locked."
                         )
 
-                        # --- DM MIKE a private log of the wish ---
-                        try:
-                            mike = await bot.fetch_user(MIKE_USER_ID)
-
-                            imvu = self.imvu_name.value.strip()
-                            wish = self.wish_text.value.strip()
-                            note = (self.note.value or "").strip()
-
-                            rec = (self.recipient.value or "").strip()
-                            anon = (self.anon_message.value or "").strip()
-
-                            lines = [
-                                f"**New Santa Wish — {dk}**",
-                                f"From: **{interaction.user}** (`{interaction.user.id}`)",
-                                f"IMVU: **{imvu}**",
-                                f"Wish: {wish}",
-                            ]
-
-                            if note:
-                                lines.append(f"Note: {note}")
-
-                            if rec and anon:
-                                lines.append("")
-                                lines.append("**Anonymous delivery requested**")
-                                lines.append(f"Recipient input: `{rec}`")
-                                lines.append(f"Message:\n```{anon}```")
-                                if delivery_result_line:
-                                    lines.append(f"Status: {delivery_result_line}")
-
-                            await mike.send("\n".join(lines))
-
-                        except Exception as e:
-                            print("Santa DM-to-Mike failed:", repr(e))
-
             con.close()
 
             base_reply = await santa_says_async(
@@ -609,11 +570,11 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         finally:
             if reply_text is None:
                 reply_text = "Alright. Done."
-            
             try:
-                await interaction.edit_original_response(content=reply_text)
-            except TypeError:
-                await interaction.followup.send(reply_text)
+                await interaction.followup.send(reply_text, ephemeral=True)
+            except Exception as e:
+                print("Santa followup failed:", repr(e))
+
 
 class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Santa"):
     anon_message = discord.ui.TextInput(
