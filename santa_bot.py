@@ -427,120 +427,86 @@ class SantaWishModal(discord.ui.Modal, title="Send an Anonymous Message"):
         try:
             dk = day_key_London()
 
-            con = db()
-            cur = con.cursor()
+            rec_raw = (self.recipient.value or "").strip()
+            msg_raw = (self.anon_message.value or "").strip()
 
-            cur.execute("""
-                SELECT id FROM santa_wishes
-                WHERE day_key = ? AND user_id = ?
-                LIMIT 1
-            """, (dk, str(interaction.user.id)))
-            if cur.fetchone():
-                con.close()
-                msg = await santa_says_async(
-                    "They tried to submit another wish today.",
-                    context_hint="Tell them they already submitted a wish today. One sentence. Cheeky modern British slang. No emojis."
-                )
-                reply_text = msg
+            if not rec_raw or not msg_raw:
+                reply_text = "Put a proper recipient and a proper message. Don’t be shy."
                 return
 
+            if not sender_can_send_today(interaction.user.id):
+                reply_text = "You’ve hit today’s limit. Save the chaos for tomorrow."
+                return
+
+            recipient_user = await resolve_recipient(interaction, rec_raw)
+            if not recipient_user:
+                reply_text = "That recipient isn’t valid. Use an @mention or a proper ID."
+                return
+
+            if recipient_user.id == interaction.user.id:
+                reply_text = "Sending yourself anonymous notes is unhinged. Try again."
+                return
+
+            if is_blocked(recipient_user.id):
+                reply_text = "That person’s opted out. Leave it."
+                return
+
+            delivered = 0
+            fail_reason = None
+
+            try:
+                footer = "If you want no more anonymous notes, reply: STOP"
+                payload = (
+                    f"{recipient_user.display_name}, you’ve received an anonymous message from someone.\n\n"
+                    f"Anonymous message:\n"
+                    f"```{msg_raw}```\n"
+                    f"{footer}"
+                )
+
+                await asyncio.wait_for(recipient_user.send(payload), timeout=8)
+                delivered = 1
+
+            except Exception:
+                delivered = 0
+                fail_reason = "DM failed (privacy settings / closed DMs)."
+
+            # Log delivery
+            con = db()
+            cur = con.cursor()
             cur.execute("""
-                INSERT INTO santa_wishes (day_key, user_id, discord_name, imvu_name, wish_text, note, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO santa_deliveries (
+                  day_key, sender_id, sender_name,
+                  recipient_id, recipient_name,
+                  message_text, delivered, fail_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 dk,
                 str(interaction.user.id),
                 str(interaction.user),
-                self.imvu_name.value.strip(),
-                self.wish_text.value.strip(),
-                self.note.value.strip() if self.note.value else None,
+                str(recipient_user.id),
+                str(recipient_user),
+                msg_raw,
+                delivered,
+                fail_reason,
                 now_utc_iso()
             ))
             con.commit()
-
-            delivery_result_line = ""
-            rec_raw = (self.recipient.value or "").strip()
-            msg_raw = (self.anon_message.value or "").strip()
-
-            if rec_raw and msg_raw:
-                if not sender_can_send_today(interaction.user.id):
-                    delivery_result_line = "You’ve already sent your anonymous note today. Don’t get greedy."
-                else:
-                    recipient_user = await resolve_recipient(interaction, rec_raw)
-                    if not recipient_user:
-                        delivery_result_line = "That recipient isn’t valid. Use an @mention or a proper ID."
-                    elif recipient_user.id == interaction.user.id:
-                        delivery_result_line = "Sending yourself anonymous notes is unhinged. Try again."
-                    elif is_blocked(recipient_user.id):
-                        delivery_result_line = "That person’s opted out. Leave it."
-                    else:
-                        delivered = 0
-                        fail_reason = None
-
-                        try:
-                            footer = "If you want no more anonymous notes, reply: STOP"
-
-                            payload = (
-                                f"{recipient_user.display_name}, you’ve received an anonymous message from someone.\n\n"
-                                f"Anonymous message:\n"
-                                f"```{msg_raw}```\n"
-                                f"{footer}"
-                            )
-
-                            await asyncio.wait_for(recipient_user.send(payload), timeout=8)
-                            delivered = 1
-
-                        except Exception:
-                            delivered = 0
-                            fail_reason = "DM failed (privacy settings / closed DMs)."
-
-                        # >>> MIKE COPY <<<
-                        try:
-                            mike = await bot.fetch_user(MIKE_USER_ID)
-                            await mike.send(
-                                "Anonymous delivery SENT:\n"
-                                f"To: {recipient_user} (`{recipient_user.id}`)\n"
-                                f"From: {interaction.user} (`{interaction.user.id}`)\n"
-                                f"Message:\n```{msg_raw}```"
-                            )
-                        except Exception:
-                            pass
-
-                        cur.execute("""
-                            INSERT INTO santa_deliveries (
-                              day_key, sender_id, sender_name,
-                              recipient_id, recipient_name,
-                              message_text, delivered, fail_reason, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            dk,
-                            str(interaction.user.id),
-                            str(interaction.user),
-                            str(recipient_user.id),
-                            str(recipient_user),
-                            msg_raw,
-                            delivered,
-                            fail_reason,
-                            now_utc_iso()
-                        ))
-                        con.commit()
-
-                        delivery_result_line = (
-                            "Alright. Delivered. Don’t make it weird."
-                            if delivered else
-                            "Tried to deliver it. Their DMs are locked."
-                        )
-
             con.close()
 
-            base_reply = await santa_says_async(
-                f"IMVU: {self.imvu_name.value.strip()}\n"
-                f"Wish: {self.wish_text.value.strip()}\n"
-                f"Note: {self.note.value.strip() if self.note.value else ''}",
-                context_hint="They just submitted a wish. Reply as Santa in 1–2 sentences, energetic modern British slang, cheeky. No emojis."
-            )
+            # DM MIKE a private copy
+            try:
+                mike = await bot.fetch_user(MIKE_USER_ID)
+                await mike.send(
+                    "Anonymous delivery LOG:\n"
+                    f"To: {recipient_user} (`{recipient_user.id}`)\n"
+                    f"From: {interaction.user} (`{interaction.user.id}`)\n"
+                    f"Delivered: {bool(delivered)}\n"
+                    f"Message:\n```{msg_raw}```"
+                )
+            except Exception:
+                pass
 
-            reply_text = f"{base_reply}\n\n{delivery_result_line}" if delivery_result_line else base_reply
+            reply_text = "Alright. Delivered. Don’t make it weird." if delivered else "Tried to deliver it. Their DMs are locked."
 
         except Exception as e:
             print("Santa modal submit error:", repr(e))
@@ -662,7 +628,7 @@ class SantaMainMenu(discord.ui.View):
 
     @discord.ui.button(label="Send Anonymous Message", style=discord.ButtonStyle.secondary)
     async def anon(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(SantaAnonModal())
+        await interaction.response.send_modal(SantaWishModal())
 
             
 class SantaAnonPickRecipientView(discord.ui.View):
