@@ -401,40 +401,21 @@ async def delete_if_possible(message: discord.Message):
 # UI: Wish Modal + Button
 # =========================
 
-class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
-    imvu_name = discord.ui.TextInput(
-        label="Your IMVU Username",
-        placeholder="e.g. MikeyMoon",
-        max_length=40
-    )
-
-    wish_text = discord.ui.TextInput(
-        label="Your Wish (PID/link/description)",
-        style=discord.TextStyle.paragraph,
-        max_length=500
-    )
+class SantaWishModal(discord.ui.Modal, title="Send an Anonymous Message"):
 
     anon_message = discord.ui.TextInput(
-        label="Anonymous message to deliver (optional)",
-        required=False,
+        label="Anonymous message to deliver",
+        required=True,
         style=discord.TextStyle.paragraph,
         max_length=600,
-        placeholder="What message do you want Santa to deliver?"
+        placeholder="Write the message Santa should deliver."
     )
 
     recipient = discord.ui.TextInput(
-        label="Recipient (optional) — @mention or ID",
-        required=False,
+        label="Recipient — @mention or ID",
+        required=True,
         max_length=80,
-        placeholder="username OR 123456789012345678"
-    )
-
-    note = discord.ui.TextInput(
-        label="Message to Santa (optional)",
-        required=False,
-        style=discord.TextStyle.paragraph,
-        max_length=600,
-        placeholder="If i win, send my winnings to (IMVU Username) anonymously",
+        placeholder="@username or 123456789012345678"
     )
 
     async def on_submit(self, interaction: discord.Interaction):
