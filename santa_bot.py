@@ -423,7 +423,7 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         required=False,
         style=discord.TextStyle.paragraph,
         max_length=200,
-        placeholder="Anything Santa should know?"
+        placeholder="Anything Santa should know? (e.g. if I win, send it anonymously to an IMVU username)"
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -973,7 +973,7 @@ async def pick(interaction: discord.Interaction, count: int = 1, public: bool = 
 
     # ---- CHANGE THIS QUERY to match your actual entries table/columns ----
     # Expected: one row per entry with at least a user id / username field.
-    cur.execute("SELECT DISTINCT user_id, imvu_username FROM wish_entries")
+    cur.execute("SELECT user_id, imvu_name FROM santa_wishes")
     rows = cur.fetchall()
     con.close()
 
