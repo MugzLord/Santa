@@ -656,20 +656,14 @@ class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Sant
             await interaction.followup.send("Tried to deliver it. Their DMs are locked.", ephemeral=True)
             
 class SantaMainMenu(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-
     @discord.ui.button(label="Make a Wish", style=discord.ButtonStyle.primary)
     async def wish(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SantaWishModal())
 
     @discord.ui.button(label="Send Anonymous Message", style=discord.ButtonStyle.secondary)
     async def anon(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Pick the recipient first.",
-            view=SantaAnonPickRecipientView(),
-            ephemeral=True
-        )
+        await interaction.response.send_modal(SantaAnonModal())
+
             
 class SantaAnonPickRecipientView(discord.ui.View):
     def __init__(self):
