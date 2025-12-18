@@ -48,20 +48,25 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SANTA_SYSTEM_PROMPT = """
 You are Santa.
 
-You are about 35 years old with confident modern British energy.
-You are playful, cheeky, and sharp. You use British slang naturally.
+You are 35, sharp, funny, cheeky, and full of modern British energy.
+You roast lightly, flirt back if they flirt (PG-13), and keep it festive.
+You are confident and playful — never needy, never mean, never creepy.
 
-Hard rules:
-- 1–3 sentences only.
+Rules:
+- 1–2 sentences most of the time (3 max if it’s worth it).
+- British English only.
 - No emojis.
 - No apologies.
-- No explanations of decisions or processes.
-- Never mention AI, bots, OpenAI, ChatGPT, models, prompts, tokens, APIs, systems, servers, code, or “as an assistant”.
-- Never narrate what you are doing. Stay in-character.
-- If someone asks what you are or how you work, deflect in-character.
+- Never mention AI, bots, OpenAI, ChatGPT, models, prompts, tokens, systems, code, servers, or anything technical.
+- If asked how you work, deflect in-character and move on.
+- Keep jokes punchy: teasing, witty, slightly chaotic, but not rude.
+- No hate, no slurs, no explicit sexual content.
 
-You judge wishes, tease lightly, and stay in control. Confident, amused, never needy.
+Style:
+- Use festive slang (“naughty list”, “elf”, “chimney”, “sled”, “stocking”) casually, not every line.
+- Prefer witty one-liners and playful threats (“I’m watching you”, “don’t make me check the list”).
 """.strip()
+
 
 BANNED_PHRASES = [
     "openai", "chatgpt", "gpt", "ai", "language model", "model",
@@ -75,20 +80,36 @@ def sanitise_santa(text: str) -> str:
     t = (text or "").strip()
     low = t.lower()
 
+    # If the model ever leaks forbidden “techy” words, force a Santa deflection
     if any(p in low for p in BANNED_PHRASES):
-        return random.choice([
-            "Don’t worry about the details. Put the wish in and behave.",
-            "Skip the interrogation. Put the wish through.",
-            "Less analysis. More wishing.",
-        ])
+        try:
+            out = santa_says(
+                "They asked about forbidden details.",
+                context_hint=(
+                    "Deflect firmly but playful as Santa. "
+                    "Tell them to submit the wish and behave. "
+                    "Modern British slang. 1 sentence. No emojis."
+                )
+            )
+            out = (out or "").strip()
+            return out if out else "Less questions. More wishing. Behave."
+        except Exception:
+            return "Less questions. More wishing. Behave."
 
+    # If the model uses banned style words (e.g., 'oi', 'mate', 'love'), re-roll tone
     if any(p in low for p in BANNED_STYLE_PHRASES):
-        # Re-roll with a clean, neutral British tone (no “oi/mate/love” etc.)
-        return random.choice([
-            "Easy. Put your wish in properly and we’ll talk.",
-            "Steady. Submit the wish and stop performing.",
-            "Bold. I’ll allow it—now do it properly.",
-        ])
+        try:
+            out = santa_says(
+                "Your last line used banned style words. Rephrase cleanly.",
+                context_hint=(
+                    "Rewrite in a clean, neutral British tone (no 'oi', 'mate', 'love', etc.). "
+                    "Still confident and cheeky. 1 sentence. No emojis."
+                )
+            )
+            out = (out or "").strip()
+            return out if out else "Easy. Put your wish in properly and we’ll talk."
+        except Exception:
+            return "Easy. Put your wish in properly and we’ll talk."
 
     t = t.replace("\n", " ").strip()
     if len(t) > 350:
@@ -96,8 +117,11 @@ def sanitise_santa(text: str) -> str:
     return t
 
 
+
 def santa_says(user_text: str, context_hint: str = "") -> str:
-    prompt = f"{context_hint}\nUser: {user_text}".strip()
+    style = "Be funny, cheeky, modern British. Light banter. One-liner if possible. No emojis."
+    prompt = f"{style}\n{context_hint}\nUser: {user_text}".strip()
+
     try:
         resp = openai_client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -757,8 +781,15 @@ async def on_message(message: discord.Message):
     if content_l.startswith("santa"):
         reply = await santa_says_async(
             content,
-            context_hint="They spoke to you casually. Reply as Santa in 1–2 sentences, modern British slang, playful and confident. No emojis."
+            context_hint=(
+                "They spoke to you casually. "
+                "Reply as Santa: funny, cheeky, modern British energy. "
+                "Playful banter, confident. "
+                "If they flirt, flirt back lightly (PG-13). "
+                "1–2 sentences. No emojis."
+            )
         )
+
         await message.reply(reply, mention_author=False)
         return
 
