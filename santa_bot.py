@@ -837,12 +837,16 @@ async def send_today_list_dm(user: discord.User):
 @bot.event
 async def on_ready():
     init_db()
+
     try:
+        bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
-        print("Santa slash commands synced.")
+        print("Slash commands cleared and re-synced.")
     except Exception as e:
         print("Slash sync failed:", repr(e))
+
     print(f"Santa logged in as {bot.user}.")
+
 
 @bot.event
 async def on_message(message: discord.Message):
