@@ -241,6 +241,16 @@ def init_db():
     );
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS santa_picks (
+      day_key TEXT PRIMARY KEY,
+      pick1 INTEGER NOT NULL,
+      pick2 INTEGER NOT NULL,
+      picked_at TEXT NOT NULL
+    );
+    """)
+
+
     con.commit()
     con.close()
 
@@ -764,16 +774,6 @@ async def on_message(message: discord.Message):
         await message.author.send(f"Locked. Picks are **#{p1}** and **#{p2}**. Then run: `santa announce`.")
         return
         
-    if message.author.id == MIKE_USER_ID and content_l == "santa announce":
-        await delete_if_possible(message)
-        try:
-            await message.author.send("Alright. I’ll post it in 5 minutes. Don’t hover.")
-        except Exception:
-            pass
-        asyncio.create_task(santa_announce_today_after_delay(message.channel, delay_seconds=300))
-        return
-
-
     # MIKE-only announce (Option A) — put BEFORE channel restriction so it works anywhere
     if message.author.id == MIKE_USER_ID and content_l == "santa announce":
         await santa_announce_today(message.channel)
@@ -832,6 +832,101 @@ async def on_message(message: discord.Message):
             )
             await message.reply(reply, mention_author=False)
         return
+def get_today_wishes():
+    dk = day_key_London()
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+        SELECT imvu_name, wish_text, discord_name, user_id
+        FROM santa_wishes
+        WHERE day_key = ?
+        ORDER BY id ASC
+    """, (dk,))
+    wishes = cur.fetchall()
+    con.close()
+    return dk, wishes
+
+
+def save_today_picks(p1: int, p2: int):
+    dk = day_key_London()
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO santa_picks (day_key, pick1, pick2, picked_at)
+        VALUES (?, ?, ?, ?)
+    """, (dk, int(p1), int(p2), now_utc_iso()))
+    con.commit()
+    con.close()
+
+
+def get_today_picks():
+    dk = day_key_London()
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT pick1, pick2 FROM santa_picks WHERE day_key = ?", (dk,))
+    row = cur.fetchone()
+    con.close()
+    return row  # None or (pick1, pick2)
+
+
+async def santa_announce_today_after_delay(channel: discord.abc.Messageable, delay_seconds: int = 300):
+    await asyncio.sleep(delay_seconds)
+
+    dk, wishes = get_today_wishes()
+    picks = get_today_picks()
+
+    if not picks:
+        await channel.send("I’ve got no locked picks for today. Mike needs to run `santa pick X Y` first.")
+        return
+
+    p1, p2 = picks
+    if len(wishes) < 2:
+        await channel.send("Not enough wishes today. Try again tomorrow.")
+        return
+
+    if p1 == p2 or p1 < 1 or p2 < 1 or p1 > len(wishes) or p2 > len(wishes):
+        await channel.send("Those locked picks don’t match today’s list. Mike should re-pick.")
+        return
+
+    w1 = wishes[p1 - 1]
+    w2 = wishes[p2 - 1]
+    winner_names = [w1[0], w2[0]]
+
+    # Mark announced once per day (uses your existing santa_announcements table)
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT 1 FROM santa_announcements WHERE day_key = ?", (dk,))
+    if cur.fetchone():
+        con.close()
+        return  # already announced
+    cur.execute("""
+        INSERT INTO santa_announcements (day_key, announced_at)
+        VALUES (?, ?)
+    """, (dk, now_utc_iso()))
+    con.commit()
+    con.close()
+
+    intro = await santa_says_async(
+        "Announce today’s two winners.",
+        context_hint="Announce two winners confidently as Santa. Funny, cheeky, festive. One sentence. No emojis."
+    )
+
+    lines = "\n".join(
+        f"• **{name}** — 5k credits or the wish equivalent."
+        for name in winner_names
+    )
+
+    outro = await santa_says_async(
+        "Close the announcement.",
+        context_hint="Short cheeky closing line as Santa. One sentence. No emojis."
+    )
+
+    await channel.send(
+        f"🎅 **Santa’s Desk — {dk}**\n"
+        f"{intro}\n\n"
+        f"{lines}\n\n"
+        f"{outro}"
+    )
 
 @bot.tree.command(name="santa", description="Send a wish to Santa")
 async def santa_cmd(interaction: discord.Interaction):
