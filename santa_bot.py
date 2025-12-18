@@ -614,6 +614,130 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
             except TypeError:
                 await interaction.followup.send(reply_text)
 
+class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Santa"):
+    anon_message = discord.ui.TextInput(
+        label="Your anonymous message",
+        style=discord.TextStyle.paragraph,
+        max_length=600,
+        placeholder="Write the message Santa will deliver (no sender shown)."
+    )
+
+    def __init__(self, recipient_id: int):
+        super().__init__()
+        self.recipient_id = recipient_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        dk = day_key_London()
+        con = db()
+        cur = con.cursor()
+
+        delivered = 0
+        fail_reason = None
+
+        try:
+            recipient_user = await bot.fetch_user(self.recipient_id)
+
+            if recipient_user.id == interaction.user.id:
+                await interaction.followup.send("Sending yourself anonymous notes is unhinged. Try again.", ephemeral=True)
+                con.close()
+                return
+
+            if is_blocked(recipient_user.id):
+                await interaction.followup.send("That person’s opted out. Leave it.", ephemeral=True)
+                con.close()
+                return
+
+            if not sender_can_send_today(interaction.user.id):
+                await interaction.followup.send("You’ve already sent your anonymous note today. Don’t get greedy.", ephemeral=True)
+                con.close()
+                return
+
+            msg_raw = (self.anon_message.value or "").strip()
+            footer = "If you want no more anonymous notes, reply: STOP"
+
+            payload = (
+                f"{recipient_user.display_name}, you’ve received an anonymous message.\n\n"
+                f"Message:\n```{msg_raw}```\n"
+                f"{footer}"
+            )
+
+            await asyncio.wait_for(recipient_user.send(payload), timeout=8)
+            delivered = 1
+
+        except Exception:
+            delivered = 0
+            fail_reason = "DM failed (privacy settings / closed DMs)."
+
+        # Log ONLY deliveries (no santa_wishes insert)
+        cur.execute("""
+            INSERT INTO santa_deliveries (
+              day_key, sender_id, sender_name,
+              recipient_id, recipient_name,
+              message_text, delivered, fail_reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            dk,
+            str(interaction.user.id),
+            str(interaction.user),
+            str(self.recipient_id),
+            str(self.recipient_id),
+            (self.anon_message.value or "").strip(),
+            delivered,
+            fail_reason,
+            now_utc_iso()
+        ))
+        con.commit()
+        con.close()
+
+        # DM MIKE a private copy
+        try:
+            mike = await bot.fetch_user(MIKE_USER_ID)
+            await mike.send(
+                f"**Santa Anonymous Delivery — {dk}**\n"
+                f"From: {interaction.user} (`{interaction.user.id}`)\n"
+                f"To: <@{self.recipient_id}> (`{self.recipient_id}`)\n"
+                f"Delivered: {bool(delivered)}\n"
+                f"Message:\n```{(self.anon_message.value or '').strip()}```"
+            )
+        except Exception:
+            pass
+
+        # Sender confirmation
+        if delivered:
+            ok = await santa_says_async(
+                "Confirm the anonymous message was delivered.",
+                context_hint="Confirm delivery in 1 short cheeky sentence. No emojis."
+            )
+            await interaction.followup.send(ok, ephemeral=True)
+        else:
+            await interaction.followup.send("Tried to deliver it. Their DMs are locked.", ephemeral=True)
+            
+class SantaMainMenu(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="Make a Wish", style=discord.ButtonStyle.primary)
+    async def wish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SantaWishModal())
+
+    @discord.ui.button(label="Send Anonymous Message", style=discord.ButtonStyle.secondary)
+    async def anon(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Pick the recipient first.",
+            view=SantaAnonPickRecipientView(),
+            ephemeral=True
+        )
+            
+class SantaAnonPickRecipientView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.user_select(placeholder="Pick who gets the anonymous message…", min_values=1, max_values=1)
+    async def pick(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        recipient = select.values[0]
+        await interaction.response.send_modal(SantaAnonModal(recipient.id))
 
 class SantaWishOpenView(discord.ui.View):
     def __init__(self):
@@ -928,14 +1052,11 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
         f"{outro}"
     )
 
-@bot.tree.command(name="santa", description="Send a wish to Santa")
+@bot.tree.command(name="santa", description="Santa: wish entries or anonymous messages")
 async def santa_cmd(interaction: discord.Interaction):
-    # Optional: restrict to one channel
     if WISH_CHANNEL_ID and interaction.channel_id != WISH_CHANNEL_ID:
         await interaction.response.send_message("Use this in the wish channel.", ephemeral=True)
         return
-
-    await interaction.response.send_modal(SantaWishModal())
 
 
 bot.run(DISCORD_TOKEN)
