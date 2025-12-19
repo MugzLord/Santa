@@ -1291,7 +1291,7 @@ async def santa_announce(interaction: discord.Interaction, message: str):
         ch = bot.get_channel(WISH_CHANNEL_ID)
         if not ch:
             return
-    
+
         # staged reveal (one line at a time)
         pre = [
             "Right then… gather round.",
@@ -1303,7 +1303,7 @@ async def santa_announce(interaction: discord.Interaction, message: str):
         for line in pre:
             await ch.send(line)
             await asyncio.sleep(2)
-    
+
         # banter + the actual announcement message you entered
         banter = [
             "Try not to start a riot in chat.",
@@ -1311,12 +1311,14 @@ async def santa_announce(interaction: discord.Interaction, message: str):
             "If you’re lurking, at least lurk politely.",
             "Behave. It’s Christmas.",
         ]
-    
+
         await ch.send(f"🎅 **Ho ho ho! Santa Announcement!**")
         await asyncio.sleep(1)
         await ch.send(f"{message}")
         await asyncio.sleep(1)
         await ch.send(random.choice(banter))
+
+    asyncio.create_task(_post_later())  
 
 @bot.tree.command(name="santa", description="Santa: wish entries or anonymous messages")
 async def santa_cmd(interaction: discord.Interaction):
