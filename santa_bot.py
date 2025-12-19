@@ -332,6 +332,23 @@ def is_blocked(user_id: int) -> bool:
     con.close()
     return bool(row)
 
+def unblock_user(user_id: int) -> None:
+    con = db()
+    cur = con.cursor()
+    cur.execute("DELETE FROM santa_blocks WHERE user_id = ?", (str(user_id),))
+    con.commit()
+    con.close()
+
+
+def block_user(user_id: int) -> None:
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO santa_blocks (user_id, blocked_at)
+        VALUES (?, ?)
+    """, (str(user_id), now_utc_iso()))
+    con.commit()
+    con.close()
 
 def sender_can_send_today(sender_id: int) -> bool:
     dk = day_key_London()  # FIXED
@@ -408,6 +425,115 @@ async def delete_if_possible(message: discord.Message):
     except Exception:
         # Missing permissions or not allowed in that channel
         pass
+        
+async def deliver_pending_to_user(recipient_user: discord.User) -> tuple[int, int]:
+    """
+    Attempts to deliver all pending anonymous messages for this user via DM.
+    Returns (delivered_count, remaining_count).
+    """
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+        SELECT id, message_text, day_key
+        FROM santa_deliveries
+        WHERE recipient_id = ? AND delivered = 0
+        ORDER BY id ASC
+        LIMIT 25
+    """, (str(recipient_user.id),))
+    rows = cur.fetchall()
+    con.close()
+
+    if not rows:
+        return (0, 0)
+
+    delivered_count = 0
+
+    for delivery_id, msg_raw, dk in rows:
+        footer = "If you want no more anonymous notes, reply: STOP"
+        payload = (
+            f"You’ve received an anonymous message via Santa.\n"
+            f"(Saved from {dk})\n\n"
+            f"Anonymous message:\n"
+            f"```{(msg_raw or '').strip()}```\n"
+            f"{footer}"
+        )
+
+        try:
+            await asyncio.wait_for(recipient_user.send(payload), timeout=12)
+
+            con2 = db()
+            cur2 = con2.cursor()
+            cur2.execute("""
+                UPDATE santa_deliveries
+                SET delivered = 1, fail_reason = NULL
+                WHERE id = ?
+            """, (int(delivery_id),))
+            con2.commit()
+            con2.close()
+
+            delivered_count += 1
+
+        except discord.Forbidden:
+            # Still locked or bot blocked; leave pending
+            con2 = db()
+            cur2 = con2.cursor()
+            cur2.execute("""
+                UPDATE santa_deliveries
+                SET fail_reason = ?
+                WHERE id = ?
+            """, ("DM blocked/locked (still).", int(delivery_id)))
+            con2.commit()
+            con2.close()
+            break
+
+        except asyncio.TimeoutError:
+            con2 = db()
+            cur2 = con2.cursor()
+            cur2.execute("""
+                UPDATE santa_deliveries
+                SET fail_reason = ?
+                WHERE id = ?
+            """, ("DM timed out (Discord/network).", int(delivery_id)))
+            con2.commit()
+            con2.close()
+            break
+
+        except discord.HTTPException as e:
+            con2 = db()
+            cur2 = con2.cursor()
+            cur2.execute("""
+                UPDATE santa_deliveries
+                SET fail_reason = ?
+                WHERE id = ?
+            """, (f"DM failed (HTTP {getattr(e, 'status', '?')}).", int(delivery_id)))
+            con2.commit()
+            con2.close()
+            break
+
+        except Exception as e:
+            con2 = db()
+            cur2 = con2.cursor()
+            cur2.execute("""
+                UPDATE santa_deliveries
+                SET fail_reason = ?
+                WHERE id = ?
+            """, (f"DM failed ({type(e).__name__}).", int(delivery_id)))
+            con2.commit()
+            con2.close()
+            break
+
+    # Count what remains pending for this user
+    con3 = db()
+    cur3 = con3.cursor()
+    cur3.execute("""
+        SELECT COUNT(1)
+        FROM santa_deliveries
+        WHERE recipient_id = ? AND delivered = 0
+    """, (str(recipient_user.id),))
+    remaining = int(cur3.fetchone()[0] or 0)
+    con3.close()
+
+    return (delivered_count, remaining)
 
 # =========================
 # UI: Wish Modal + Button
@@ -759,24 +885,41 @@ async def on_message(message: discord.Message):
     content = (message.content or "").strip()
     content_l = content.lower()
 
-    # DM opt-out: user DMs Santa "STOP"
+    # DM opt-out / opt-in
     if isinstance(message.channel, discord.DMChannel):
         if content_l == "stop":
-            con = db()
-            cur = con.cursor()
-            cur.execute("""
-                INSERT OR REPLACE INTO santa_blocks (user_id, blocked_at)
-                VALUES (?, ?)
-            """, (str(message.author.id), now_utc_iso()))
-            con.commit()
-            con.close()
-
+            block_user(message.author.id)
+    
             reply = santa_says(
                 "They opted out.",
                 context_hint="Confirm they've opted out. One sentence. Modern British slang. No emojis."
             )
             await message.reply(reply)
+            return
+    
+        if content_l in {"start", "unstop", "optin", "resume"}:
+            unblock_user(message.author.id)
+    
+            reply = santa_says(
+                "They opted back in.",
+                context_hint="Confirm they're opted back in. One sentence. Cheeky Santa. No emojis."
+            )
+            await message.reply(reply)
+    
+            # Deliver any pending messages now that they're opted in
+            try:
+                delivered_count, remaining = await deliver_pending_to_user(message.author)
+                if delivered_count > 0:
+                    await message.author.send(f"Delivered {delivered_count} pending note(s).")
+                if remaining > 0:
+                    await message.author.send("Still can’t deliver the rest. Your DMs are still locked.")
+            except Exception as e:
+                print("Pending delivery error:", repr(e))
+    
+            return
+    
         return
+
 
     # MIKE-only list (DM only)
     if message.author.id == MIKE_USER_ID and content_l == "santa list":
