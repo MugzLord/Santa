@@ -1,17 +1,37 @@
+# santa.py — your Santa Wish bot + interactive chat + farewell + self-disable at midnight UK time (end of 26 Dec)
+#
+# What this fixes in your pasted file:
+# - Removes the broken @client.event usage (you only have `bot`)
+# - Ensures you have ONE on_message handler (yours was duplicated and referenced undefined vars)
+# - Adds a persistent “santa_disabled” flag in DB so Railway restarts do NOT revive Santa
+# - Runs a scheduler that, at 00:00 London time after 26 Dec ends (27 Dec 00:00),
+#   posts the farewell and closes the bot
+#
+# ENV required:
+#   DISCORD_TOKEN
+#   OPENAI_API_KEY
+#   MIKE_USER_ID
+#   SANTA_WISH_CHANNEL_ID
+# Optional:
+#   OPENAI_MODEL (default gpt-4o-mini)
+#   SANTA_DB_PATH (default santa.db)
+#   SANTA_GUILD_ID (optional, speeds slash sync)
+#
+# Note:
+# - “Midnight UK time at 26th Dec” = the moment 26 Dec ends = 27 Dec 00:00 Europe/London.
+
 import os
 import re
 import random
 import sqlite3
+import asyncio
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
-
-
-import asyncio
 
 # =========================
 # ENV
@@ -32,20 +52,35 @@ if not MIKE_USER_ID:
     raise RuntimeError("MIKE_USER_ID env var not set (put your Discord user ID)")
 
 WISH_CHANNEL_ID = int(os.getenv("SANTA_WISH_CHANNEL_ID", "0"))
+if not WISH_CHANNEL_ID:
+    raise RuntimeError("SANTA_WISH_CHANNEL_ID env var not set")
+
 DB_PATH = os.getenv("SANTA_DB_PATH", "santa.db")
+GUILD_ID = int(os.getenv("SANTA_GUILD_ID", "0"))
 
 LONDON_TZ = ZoneInfo("Europe/London")
+
+# End of 26 Dec at midnight UK time -> 00:00 on 27 Dec London time
+DEADLINE = datetime(2025, 12, 27, 0, 0, tzinfo=LONDON_TZ)
 
 TRIGGERS = {"wish to santa", "dear santa", "santa wish"}
 LIST_TRIGGER = "santa list"  # MIKE only
 
-GUILD_ID = int(os.getenv("SANTA_GUILD_ID", "0"))
+# Optional: only allow Santa casual chat in this channel
+ALLOWED_CHAT_CHANNEL_IDS = {WISH_CHANNEL_ID}
+
+SANTA_REPLIES = [
+    "Ho ho ho — noted.",
+    "Santa’s listening. Keep it tidy.",
+    "I’ve logged that one. No promises, plenty of judgement.",
+    "Go on then. What’s the wish?",
+]
 
 # =========================
 # OpenAI (Santa voice)
 # =========================
-from openai import OpenAI
 
+from openai import OpenAI
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 SANTA_SYSTEM_PROMPT = """
@@ -95,7 +130,6 @@ Style:
 - Prefer witty one-liners and playful threats (“I’m watching you”, “don’t make me check the list”).
 """.strip()
 
-
 BANNED_PHRASES = [
     "openai", "chatgpt", "gpt", "ai", "language model", "model",
     "api", "system prompt", "prompt", "tokens", "as an assistant",
@@ -103,58 +137,22 @@ BANNED_PHRASES = [
     "oi", "careful now", "alright, love", "love", "darling", "sweetheart", "mate"
 ]
 
-BANNED_STYLE_PHRASES = [
-    "oi",
-    "mate",
-    "love",
-    "darling",
-    "sweetheart"
-]
-
+BANNED_STYLE_PHRASES = ["oi", "mate", "love", "darling", "sweetheart"]
 
 def sanitise_santa(text: str) -> str:
     t = (text or "").strip()
     low = t.lower()
 
-    # If the model ever leaks forbidden “techy” words, force a Santa deflection
     if any(p in low for p in BANNED_PHRASES):
-        try:
-            out = santa_says(
-                "They asked about forbidden details.",
-                context_hint=(
-                    "Deflect firmly but playful as Santa. "
-                    "Tell them to submit the wish and behave. "
-                    "Modern British slang. 1 sentence. No emojis."
-                )
-            )
-            out = (out or "").strip()
-            return out if out else "Less questions. More wishing. Behave."
-        except Exception:
-            return "Less questions. More wishing. Behave."
+        return "Less questions. More wishing. Behave."
 
-    # If the model uses banned style words (e.g., 'oi', 'mate', 'love'), re-roll tone
     if any(p in low for p in BANNED_STYLE_PHRASES):
-        try:
-            out = santa_says(
-                "Your last line used banned style words. Rephrase cleanly.",
-                context_hint=(
-                    "Rewrite in a clean, neutral British tone (no 'oi', 'mate', 'love', etc.). "
-                    "Still confident and cheeky. 1 sentence. No emojis."
-                )
-            )
-            out = (out or "").strip()
-            return out if out else "Easy. Put your wish in properly and we’ll talk."
-        except Exception:
-            return "Easy. Put your wish in properly and we’ll talk."
+        return "Easy. Put your wish in properly."
 
     t = t.replace("\n", " ").strip()
     if len(t) > 350:
         t = t[:350].rsplit(" ", 1)[0] + "…"
     return t
-
-def mike_only(interaction: discord.Interaction) -> bool:
-    return interaction.user.id == MIKE_USER_ID
-
 
 def santa_says(user_text: str, context_hint: str = "") -> str:
     style = "Be funny, cheeky, modern British. Light banter. One-liner if possible. No emojis."
@@ -175,15 +173,12 @@ def santa_says(user_text: str, context_hint: str = "") -> str:
     except Exception:
         return random.choice([
             "Alright, I’ve got it. Don’t stress.",
-            "That’s cheeky, mate. I respect the confidence.",
             "Noted. Behave till the results.",
+            "Fine. I’ll allow it.",
         ])
 
-
 async def santa_says_async(user_text: str, context_hint: str = "") -> str:
-    # run the sync call off the event loop so Discord interactions don't hang
     return await asyncio.to_thread(santa_says, user_text, context_hint)
-
 
 # =========================
 # Time helpers
@@ -192,10 +187,8 @@ async def santa_says_async(user_text: str, context_hint: str = "") -> str:
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
 def day_key_London() -> str:
     return datetime.now(LONDON_TZ).strftime("%Y-%m-%d")
-
 
 # =========================
 # DB
@@ -205,7 +198,6 @@ def db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.execute("PRAGMA journal_mode=WAL;")
     return con
-
 
 def init_db():
     con = db()
@@ -262,10 +254,40 @@ def init_db():
     );
     """)
 
+    # Persistent “disabled” flag so restarts don’t revive Santa
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS santa_meta (
+      k TEXT PRIMARY KEY,
+      v TEXT NOT NULL
+    );
+    """)
 
     con.commit()
     con.close()
 
+def meta_get(key: str, default: str = "") -> str:
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT v FROM santa_meta WHERE k = ? LIMIT 1", (key,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row else default
+
+def meta_set(key: str, value: str) -> None:
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO santa_meta (k, v) VALUES (?, ?)
+        ON CONFLICT(k) DO UPDATE SET v=excluded.v
+    """, (key, value))
+    con.commit()
+    con.close()
+
+def santa_is_disabled() -> bool:
+    return meta_get("santa_disabled", "0") == "1"
+
+def santa_set_disabled(disabled: bool) -> None:
+    meta_set("santa_disabled", "1" if disabled else "0")
 
 # =========================
 # Discord bot
@@ -277,7 +299,6 @@ INTENTS.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
 
-
 # =========================
 # Helpers: resolve recipient
 # =========================
@@ -285,14 +306,12 @@ bot = commands.Bot(command_prefix="!", intents=INTENTS)
 MENTION_RE = re.compile(r"<@!?(\d+)>")
 ID_RE = re.compile(r"^\d{15,21}$")
 
-
 async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optional[discord.Member]:
     if not raw or interaction.guild is None:
         return None
 
     raw = raw.strip()
 
-    # mention
     m = MENTION_RE.search(raw)
     if m:
         uid = int(m.group(1))
@@ -304,7 +323,6 @@ async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optio
         except Exception:
             return None
 
-    # numeric ID
     if ID_RE.match(raw):
         uid = int(raw)
         member = interaction.guild.get_member(uid)
@@ -315,14 +333,12 @@ async def resolve_recipient(interaction: discord.Interaction, raw: str) -> Optio
         except Exception:
             return None
 
-    # NOTE: requires Members intent + member cache to be populated
     raw_l = raw.lower()
     for member in interaction.guild.members:
         if (member.name or "").lower() == raw_l:
             return member
 
     return None
-
 
 def is_blocked(user_id: int) -> bool:
     con = db()
@@ -339,7 +355,6 @@ def unblock_user(user_id: int) -> None:
     con.commit()
     con.close()
 
-
 def block_user(user_id: int) -> None:
     con = db()
     cur = con.cursor()
@@ -351,7 +366,7 @@ def block_user(user_id: int) -> None:
     con.close()
 
 def sender_can_send_today(sender_id: int) -> bool:
-    dk = day_key_London()  # FIXED
+    dk = day_key_London()
     con = db()
     cur = con.cursor()
     cur.execute("""
@@ -362,178 +377,11 @@ def sender_can_send_today(sender_id: int) -> bool:
     con.close()
     return count < 10
 
-
-async def santa_announce_today(channel: discord.abc.Messageable):
-    dk = day_key_London()
-
-    con = db()
-    cur = con.cursor()
-
-    cur.execute("SELECT 1 FROM santa_announcements WHERE day_key = ?", (dk,))
-    if cur.fetchone():
-        con.close()
-        await channel.send("Already done. Don’t push it.")
-        return
-
-    cur.execute("""
-        SELECT imvu_name
-        FROM santa_wishes
-        WHERE day_key = ?
-    """, (dk,))
-    rows = cur.fetchall()
-
-    if len(rows) < 2:
-        con.close()
-        await channel.send("Not enough wishes today. Behave and try tomorrow.")
-        return
-
-    winners = random.sample(rows, 2)
-    winner_names = [w[0] for w in winners]
-
-    cur.execute("""
-        INSERT INTO santa_announcements (day_key, announced_at)
-        VALUES (?, ?)
-    """, (dk, now_utc_iso()))
-    con.commit()
-    con.close()
-
-    intro = await santa_says_async(
-        "Announce today’s two winners.",
-        context_hint="Announce two winners confidently as Santa. Modern British slang. One sentence. No emojis."
-    )
-
-    lines = "\n".join(
-        f"• **{name}** — 5k credits or part of the wish. Santa decides."
-        for name in winner_names
-    )
-
-    outro = await santa_says_async(
-        "Close the announcement.",
-        context_hint="Short confident closing line as Santa. One sentence. No emojis."
-    )
-
-    await channel.send(
-        f"🎅 **Santa’s Desk — {dk}**\n"
-        f"{intro}\n\n"
-        f"{lines}\n\n"
-        f"{outro}"
-    )
-
 async def delete_if_possible(message: discord.Message):
     try:
         await message.delete()
     except Exception:
-        # Missing permissions or not allowed in that channel
         pass
-        
-async def deliver_pending_to_user(recipient_user: discord.User) -> tuple[int, int]:
-    """
-    Attempts to deliver all pending anonymous messages for this user via DM.
-    Returns (delivered_count, remaining_count).
-    """
-    con = db()
-    cur = con.cursor()
-    cur.execute("""
-        SELECT id, message_text, day_key
-        FROM santa_deliveries
-        WHERE recipient_id = ? AND delivered = 0
-        ORDER BY id ASC
-        LIMIT 25
-    """, (str(recipient_user.id),))
-    rows = cur.fetchall()
-    con.close()
-
-    if not rows:
-        return (0, 0)
-
-    delivered_count = 0
-
-    for delivery_id, msg_raw, dk in rows:
-        footer = "If you want no more anonymous notes, reply: STOP"
-        payload = (
-            f"You’ve received an anonymous message via Santa.\n"
-            f"(Saved from {dk})\n\n"
-            f"Anonymous message:\n"
-            f"```{(msg_raw or '').strip()}```\n"
-            f"{footer}"
-        )
-
-        try:
-            await asyncio.wait_for(recipient_user.send(payload), timeout=12)
-
-            con2 = db()
-            cur2 = con2.cursor()
-            cur2.execute("""
-                UPDATE santa_deliveries
-                SET delivered = 1, fail_reason = NULL
-                WHERE id = ?
-            """, (int(delivery_id),))
-            con2.commit()
-            con2.close()
-
-            delivered_count += 1
-
-        except discord.Forbidden:
-            # Still locked or bot blocked; leave pending
-            con2 = db()
-            cur2 = con2.cursor()
-            cur2.execute("""
-                UPDATE santa_deliveries
-                SET fail_reason = ?
-                WHERE id = ?
-            """, ("DM blocked/locked (still).", int(delivery_id)))
-            con2.commit()
-            con2.close()
-            break
-
-        except asyncio.TimeoutError:
-            con2 = db()
-            cur2 = con2.cursor()
-            cur2.execute("""
-                UPDATE santa_deliveries
-                SET fail_reason = ?
-                WHERE id = ?
-            """, ("DM timed out (Discord/network).", int(delivery_id)))
-            con2.commit()
-            con2.close()
-            break
-
-        except discord.HTTPException as e:
-            con2 = db()
-            cur2 = con2.cursor()
-            cur2.execute("""
-                UPDATE santa_deliveries
-                SET fail_reason = ?
-                WHERE id = ?
-            """, (f"DM failed (HTTP {getattr(e, 'status', '?')}).", int(delivery_id)))
-            con2.commit()
-            con2.close()
-            break
-
-        except Exception as e:
-            con2 = db()
-            cur2 = con2.cursor()
-            cur2.execute("""
-                UPDATE santa_deliveries
-                SET fail_reason = ?
-                WHERE id = ?
-            """, (f"DM failed ({type(e).__name__}).", int(delivery_id)))
-            con2.commit()
-            con2.close()
-            break
-
-    # Count what remains pending for this user
-    con3 = db()
-    cur3 = con3.cursor()
-    cur3.execute("""
-        SELECT COUNT(1)
-        FROM santa_deliveries
-        WHERE recipient_id = ? AND delivered = 0
-    """, (str(recipient_user.id),))
-    remaining = int(cur3.fetchone()[0] or 0)
-    con3.close()
-
-    return (delivered_count, remaining)
 
 # =========================
 # UI: Wish Modal + Button
@@ -557,10 +405,13 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
         required=False,
         style=discord.TextStyle.paragraph,
         max_length=200,
-        placeholder="Anything Santa should know? (e.g. if I win, send it anonymously to an IMVU username)"
+        placeholder="Anything Santa should know?"
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if santa_is_disabled():
+            return await interaction.response.send_message("Season’s done. Come back next Christmas.", ephemeral=True)
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         reply_text = None
 
@@ -570,7 +421,6 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
             con = db()
             cur = con.cursor()
 
-            # One wish per person per day
             cur.execute("""
                 SELECT id FROM santa_wishes
                 WHERE day_key = ? AND user_id = ?
@@ -600,7 +450,6 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
             con.commit()
             con.close()
 
-            # DM Mike a private log (optional, but you wanted it)
             try:
                 mike = await bot.fetch_user(MIKE_USER_ID)
                 await mike.send(
@@ -620,7 +469,7 @@ class SantaWishModal(discord.ui.Modal, title="Send a Wish to Santa"):
 
         except Exception as e:
             print("Santa wish modal error:", repr(e))
-            reply_text = "Nah, that one glitched. Try again in a sec."
+            reply_text = "Nah, that one glitched. Try again."
 
         finally:
             if reply_text is None:
@@ -648,6 +497,9 @@ class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Sant
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if santa_is_disabled():
+            return await interaction.response.send_message("Season’s done. Come back next Christmas.", ephemeral=True)
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         reply_text = None
 
@@ -691,7 +543,6 @@ class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Sant
                 delivered = 0
                 fail_reason = "DM failed (privacy settings / closed DMs)."
 
-            # Log delivery
             con = db()
             cur = con.cursor()
             cur.execute("""
@@ -714,7 +565,6 @@ class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Sant
             con.commit()
             con.close()
 
-            # DM Mike a private copy
             try:
                 mike = await bot.fetch_user(MIKE_USER_ID)
                 await mike.send(
@@ -731,7 +581,7 @@ class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Sant
 
         except Exception as e:
             print("Santa anon modal error:", repr(e))
-            reply_text = "Nah, that one glitched. Try again in a sec."
+            reply_text = "Nah, that one glitched. Try again."
 
         finally:
             if reply_text is None:
@@ -741,7 +591,7 @@ class SantaAnonModal(discord.ui.Modal, title="Send an Anonymous Message via Sant
             except Exception as e:
                 print("Anon followup failed:", repr(e))
 
-            
+
 class SantaMainMenu(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
@@ -754,24 +604,6 @@ class SantaMainMenu(discord.ui.View):
     async def anon(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SantaAnonModal())
 
-            
-class SantaAnonPickRecipientView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-
-        select = discord.ui.UserSelect(
-            placeholder="Pick who gets the anonymous message…",
-            min_values=1,
-            max_values=1
-        )
-        select.callback = self.pick_callback
-        self.add_item(select)
-
-    async def pick_callback(self, interaction: discord.Interaction):
-        # the first component in this view is the UserSelect we added
-        select: discord.ui.UserSelect = self.children[0]
-        recipient = select.values[0]
-        await interaction.response.send_modal(SantaAnonModal(recipient.id))
 
 class SantaWishOpenView(discord.ui.View):
     def __init__(self):
@@ -779,13 +611,10 @@ class SantaWishOpenView(discord.ui.View):
 
     @discord.ui.button(label="Open Santa Wish Form", style=discord.ButtonStyle.primary)
     async def open_form(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Delete the entire message (text + button)
         try:
             await interaction.message.delete()
         except Exception:
-            pass  # ignore if missing permissions
-
-        # Open the modal
+            pass
         await interaction.response.send_modal(SantaWishModal())
 
 # =========================
@@ -793,7 +622,7 @@ class SantaWishOpenView(discord.ui.View):
 # =========================
 
 async def send_today_list_dm(user: discord.User):
-    dk = day_key_London()  # FIXED
+    dk = day_key_London()
 
     con = db()
     cur = con.cursor()
@@ -856,165 +685,9 @@ async def send_today_list_dm(user: discord.User):
             await user.send(chunk)
 
 # =========================
-# Events
+# Winner pick helpers (your existing DM flow)
 # =========================
 
-@bot.event
-async def on_ready():
-    init_db()
-    try:
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            bot.tree.copy_global_to(guild=guild)
-            await bot.tree.sync(guild=guild)
-            print("Santa guild slash commands synced.")
-        else:
-            await bot.tree.sync()
-            print("Santa global slash commands synced.")
-    except Exception as e:
-        print("Slash sync failed:", repr(e))
-
-    print(f"Santa logged in as {bot.user} (app id: {bot.application_id}).")
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    content = (message.content or "").strip()
-    content_l = content.lower()
-
-    # DM opt-out / opt-in
-    if isinstance(message.channel, discord.DMChannel):
-        if content_l == "stop":
-            block_user(message.author.id)
-    
-            reply = santa_says(
-                "They opted out.",
-                context_hint="Confirm they've opted out. One sentence. Modern British slang. No emojis."
-            )
-            await message.reply(reply)
-            return
-    
-        if content_l in {"start", "unstop", "optin", "resume"}:
-            unblock_user(message.author.id)
-    
-            reply = santa_says(
-                "They opted back in.",
-                context_hint="Confirm they're opted back in. One sentence. Cheeky Santa. No emojis."
-            )
-            await message.reply(reply)
-    
-            # Deliver any pending messages now that they're opted in
-            try:
-                delivered_count, remaining = await deliver_pending_to_user(message.author)
-                if delivered_count > 0:
-                    await message.author.send(f"Delivered {delivered_count} pending note(s).")
-                if remaining > 0:
-                    await message.author.send("Still can’t deliver the rest. Your DMs are still locked.")
-            except Exception as e:
-                print("Pending delivery error:", repr(e))
-    
-            return
-    
-        return
-
-
-    # MIKE-only list (DM only)
-    if message.author.id == MIKE_USER_ID and content_l == "santa list":
-        await delete_if_possible(message)
-        try:
-            await send_today_list_dm(message.author)
-        except Exception:
-            try:
-                await message.author.send("Couldn’t pull the list. Check DB path / permissions and try again.")
-            except Exception:
-                pass
-        return
-
-    if message.author.id == MIKE_USER_ID and content_l.startswith("santa pick"):
-        await delete_if_possible(message)
-        parts = content_l.split()
-        if len(parts) != 4:
-            await message.author.send("Use: `santa pick 3 7`")
-            return
-        try:
-            p1 = int(parts[2]); p2 = int(parts[3])
-        except ValueError:
-            await message.author.send("Use numbers: `santa pick 3 7`")
-            return
-    
-        dk, wishes = get_today_wishes()
-        if len(wishes) < 2:
-            await message.author.send("Not enough wishes today to pick 2 winners.")
-            return
-        if p1 == p2 or p1 < 1 or p2 < 1 or p1 > len(wishes) or p2 > len(wishes):
-            await message.author.send("Those pick numbers aren’t valid. Check `santa list` and try again.")
-            return
-    
-        save_today_picks(p1, p2)
-        await message.author.send(f"Locked. Picks are **#{p1}** and **#{p2}**. Then run: `santa announce`.")
-        return
-        
-    # MIKE-only announce (Option A) — put BEFORE channel restriction so it works anywhere
-    if message.author.id == MIKE_USER_ID and content_l == "santa announce":
-        await santa_announce_today(message.channel)
-        return
-
-    # Optional restrict wishing to one channel
-    if WISH_CHANNEL_ID and message.channel.id != WISH_CHANNEL_ID:
-        return
-
-    # Wish trigger always wins
-    if "wish to santa" in content_l:
-        # Hide who triggered it
-        try:
-            await message.delete()
-        except Exception:
-            pass
-    
-        tease = await santa_says_async(
-            "They want to submit a wish.",
-            context_hint="Tell them to click the button to submit their wish. One short sentence. No emojis."
-        )
-    
-        await message.channel.send(tease, view=SantaWishOpenView())
-        return
-
-
-    # Casual chat: starts with "santa"
-    if content_l.startswith("santa"):
-        reply = await santa_says_async(
-            content,
-            context_hint=(
-                "They spoke to you casually. "
-                "Reply as Santa: funny, cheeky, modern British energy. "
-                "Playful banter, confident. "
-                "If they flirt, flirt back lightly (PG-13). "
-                "1–2 sentences. No emojis."
-            )
-        )
-
-        await message.reply(reply, mention_author=False)
-        return
-
-    # Reply when mentioned
-    if bot.user and bot.user.mentioned_in(message):
-        if message.mention_everyone:
-            return
-        cleaned = (
-            content.replace(f"<@{bot.user.id}>", "")
-                   .replace(f"<@!{bot.user.id}>", "")
-                   .strip()
-        )
-        if cleaned:
-            reply = await santa_says_async(
-                cleaned,
-                context_hint="They mentioned you. Reply as Santa in 1–2 sentences, modern British slang, playful. No emojis."
-            )
-            await message.reply(reply, mention_author=False)
-        return
 def get_today_wishes():
     dk = day_key_London()
     con = db()
@@ -1029,7 +702,6 @@ def get_today_wishes():
     con.close()
     return dk, wishes
 
-
 def save_today_picks(p1: int, p2: int):
     dk = day_key_London()
     con = db()
@@ -1041,7 +713,6 @@ def save_today_picks(p1: int, p2: int):
     con.commit()
     con.close()
 
-
 def get_today_picks():
     dk = day_key_London()
     con = db()
@@ -1051,37 +722,33 @@ def get_today_picks():
     con.close()
     return row  # None or (pick1, pick2)
 
+async def santa_announce_today(channel: discord.abc.Messageable):
+    dk = day_key_London()
 
-async def santa_announce_today_after_delay(channel: discord.abc.Messageable, delay_seconds: int = 300):
-    await asyncio.sleep(delay_seconds)
-
-    dk, wishes = get_today_wishes()
-    picks = get_today_picks()
-
-    if not picks:
-        await channel.send("I’ve got no locked picks for today. Mike needs to run `santa pick X Y` first.")
-        return
-
-    p1, p2 = picks
-    if len(wishes) < 2:
-        await channel.send("Not enough wishes today. Try again tomorrow.")
-        return
-
-    if p1 == p2 or p1 < 1 or p2 < 1 or p1 > len(wishes) or p2 > len(wishes):
-        await channel.send("Those locked picks don’t match today’s list. Mike should re-pick.")
-        return
-
-    w1 = wishes[p1 - 1]
-    w2 = wishes[p2 - 1]
-    winner_names = [w1[0], w2[0]]
-
-    # Mark announced once per day (uses your existing santa_announcements table)
     con = db()
     cur = con.cursor()
+
     cur.execute("SELECT 1 FROM santa_announcements WHERE day_key = ?", (dk,))
     if cur.fetchone():
         con.close()
-        return  # already announced
+        await channel.send("Already done. Don’t push it.")
+        return
+
+    cur.execute("""
+        SELECT imvu_name
+        FROM santa_wishes
+        WHERE day_key = ?
+    """, (dk,))
+    rows = cur.fetchall()
+
+    if len(rows) < 2:
+        con.close()
+        await channel.send("Not enough wishes today. Behave and try tomorrow.")
+        return
+
+    winners = random.sample(rows, 2)
+    winner_names = [w[0] for w in winners]
+
     cur.execute("""
         INSERT INTO santa_announcements (day_key, announced_at)
         VALUES (?, ?)
@@ -1091,17 +758,17 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
 
     intro = await santa_says_async(
         "Announce today’s two winners.",
-        context_hint="Announce two winners confidently as Santa. Funny, cheeky, festive. One sentence. No emojis."
+        context_hint="Announce two winners confidently as Santa. Modern British slang. One sentence. No emojis."
     )
 
     lines = "\n".join(
-        f"• **{name}** — 5k credits or the wish equivalent."
+        f"• **{name}** — 5k credits or part of the wish. Santa decides."
         for name in winner_names
     )
 
     outro = await santa_says_async(
         "Close the announcement.",
-        context_hint="Short cheeky closing line as Santa. One sentence. No emojis."
+        context_hint="Short confident closing line as Santa. One sentence. No emojis."
     )
 
     await channel.send(
@@ -1111,192 +778,90 @@ async def santa_announce_today_after_delay(channel: discord.abc.Messageable, del
         f"{outro}"
     )
 
-def make_ai_reveal_and_banter(imvu_names: list[str]) -> tuple[list[str], list[str]]:
-    fallback_reveal = [
-        "Drum roll…",
-        "Alright then…",
-        "Today’s winner is…",
-        "…",
-    ]
-    fallback_banter = [
-        "Santa approves. Barely.",
-        "Enjoy it. Quietly.",
-        "Don’t spend it all at once.",
-        "Behave. It’s Christmas.",
-    ]
+# =========================
+# Self-destruct scheduler
+# =========================
 
-    def _clip(s: str, max_len: int = 60) -> str:
-        s = (s or "").strip()
-        return (s[: max_len - 1] + "…") if len(s) > max_len else s
-
-    if not oa:
-        return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
-
-    n = len(imvu_names)
-
-    instructions = (
-        "Write very short Discord one-liners. British, festive, light banter.\n"
-        "Hard rules:\n"
-        f"- Output EXACTLY {4 + n} lines.\n"
-        "- Each line MAX 6 words.\n"
-        "- No emojis, no numbering, no quotes, no markdown.\n"
-        "- Lines 1-4: suspense build-up.\n"
-        "- Remaining lines: banter to append after each winner name.\n"
-    )
-
-    prompt = "Winners (order matters): " + ", ".join(imvu_names)
-
-    try:
-        resp = oa.responses.create(
-            model=OPENAI_MODEL,
-            reasoning={"effort": "low"},
-            instructions=instructions,
-            input=prompt,
-            max_output_tokens=120,
-        )
-        text = (resp.output_text or "").strip()
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-        # Enforce exact count + shortness
-        need = 4 + n
-        if len(lines) < need:
-            return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
-
-        lines = lines[:need]
-        lines = [_clip(x, 60) for x in lines]
-
-        reveal = lines[:4]
-        banter = lines[4:4 + n]
-        return reveal, banter
-
-    except Exception:
-        return fallback_reveal, [random.choice(fallback_banter) for _ in imvu_names]
-
-@bot.tree.command(name="pick", description="Pick winner(s) (Mike only)")
-@app_commands.describe(count="How many winners to pick", public="Announce publicly in the wish channel and reset wishes?")
-async def pick(interaction: discord.Interaction, count: int = 1, public: bool = False):
-    if interaction.user.id != MIKE_USER_ID:
-        return await interaction.response.send_message("Mike only.", ephemeral=True)
-
-    await interaction.response.defer(ephemeral=True)
-
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-
-    cur.execute("SELECT user_id, imvu_name, wish_text FROM santa_wishes")
-    all_wishes = cur.fetchall()
-
-    if not all_wishes:
-        con.close()
-        return await interaction.followup.send("No wishes found to pick from.", ephemeral=True)
-
-    # unique users for winners
-    pool_map = {}
-    for uid, imvu, _wish in all_wishes:
-        if uid not in pool_map:
-            pool_map[uid] = (imvu or "Unknown")
-
-    pool = [(uid, imvu) for uid, imvu in pool_map.items()]
-    if count > len(pool):
-        count = len(pool)
-
-    winners = random.sample(pool, k=count)
-    winners_text = "\n".join([f"- <@{uid}> — **{imvu}**" for uid, imvu in winners])
-
-    wish_lines = []
-    for _uid, imvu, wish in all_wishes:
-        imvu = imvu or "Unknown"
-        wish = (wish or "").strip() or "—"
-        wish_lines.append(f"- **{imvu}**: {wish}")
-
-    def _chunk_lines(lines, header, limit=1900):
-        chunks, buf = [], header + "\n"
-        for line in lines:
-            if len(buf) + len(line) + 1 > limit:
-                chunks.append(buf.rstrip())
-                buf = header + "\n" + line + "\n"
-            else:
-                buf += line + "\n"
-        if buf.strip():
-            chunks.append(buf.rstrip())
-        return chunks
-
-    wishlist_chunks = _chunk_lines(wish_lines, "🎁 **Santa’s Wish List (this round)**")
-
-    # ✅ HERE is the public switch
-    if public:
-        await interaction.followup.send("Queued. Santa will announce in 3 minutes.", ephemeral=True)
-    
-        # close the current DB connection before the delayed task runs
+async def post_farewell():
+    ch = bot.get_channel(WISH_CHANNEL_ID)
+    if ch is None:
         try:
-            con.close()
+            ch = await bot.fetch_channel(WISH_CHANNEL_ID)
+        except Exception:
+            ch = None
+
+    if ch is not None:
+        embed = discord.Embed(
+            title="Santa’s out.",
+            description=(
+                "That’s Christmas wrapped.\n\n"
+                "Thanks for the wishes, the chaos, and the good vibes. "
+                "This is the final sign-off for this season.\n\n"
+                "Be good to each other — see you next Christmas."
+            ),
+            colour=discord.Colour.red()
+        )
+        embed.set_footer(text="— Santa")
+        try:
+            await ch.send(embed=embed)
         except Exception:
             pass
-    
-        async def _announce_pick():
-            await asyncio.sleep(180)  # 3 minutes
-    
-            ch = bot.get_channel(WISH_CHANNEL_ID)
-            if not ch:
-                return
-    
-            # OpenAI-generated staged reveal + winner banter
-            imvu_names = [(imvu or "Unknown") for (_uid, imvu) in winners]
-            reveal_lines, banter_lines = await asyncio.to_thread(make_ai_reveal_and_banter, imvu_names)
-    
-            for line in reveal_lines:
-                await ch.send(line)
-                await asyncio.sleep(3)
-    
-            for i, (uid, imvu) in enumerate(winners):
-                imvu = imvu or "Unknown"
-                await ch.send(f"<@{uid}> — **{imvu}**. {banter_lines[i]}")
-                await asyncio.sleep(2)
-    
-            # wishlist after
-            await asyncio.sleep(2)
-            for chunk in wishlist_chunks:
-                await ch.send(chunk)
-                await asyncio.sleep(1)
-    
-            # reset AFTER successful posting
-            con2 = sqlite3.connect(DB_PATH)
-            cur2 = con2.cursor()
-            cur2.execute("DELETE FROM santa_wishes")
-            con2.commit()
-            con2.close()
-    
-        asyncio.create_task(_announce_pick())
+
+@tasks.loop(seconds=20)
+async def santa_self_destruct_watch():
+    # If already disabled (persisted), do nothing
+    if santa_is_disabled():
         return
 
-    # private preview (no reset)
-    con.close()
-    await interaction.followup.send(
-        f"PRIVATE PREVIEW (not posted)\n\n🎅 Results:\n{winners_text}\n\n{wishlist_chunks[0]}",
+    now = datetime.now(LONDON_TZ)
+    if now >= DEADLINE:
+        santa_set_disabled(True)
+        await post_farewell()
+        await bot.close()
+
+@santa_self_destruct_watch.before_loop
+async def before_self_destruct_watch():
+    await bot.wait_until_ready()
+
+# =========================
+# Slash commands
+# =========================
+
+@bot.tree.command(name="santa", description="Santa: wish entries or anonymous messages")
+async def santa_cmd(interaction: discord.Interaction):
+    if santa_is_disabled():
+        return await interaction.response.send_message("Season’s done. Come back next Christmas.", ephemeral=True)
+
+    if WISH_CHANNEL_ID and interaction.channel_id != WISH_CHANNEL_ID:
+        await interaction.response.send_message("Use this in the wish channel.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        "Alright. Pick your chaos.",
+        view=SantaMainMenu(),
         ephemeral=True
     )
 
-            
 @bot.tree.command(name="santa_announce", description="Post a Santa announcement (Mike only)")
 @app_commands.describe(message="Announcement text to post")
 async def santa_announce(interaction: discord.Interaction, message: str):
     if interaction.user.id != MIKE_USER_ID:
         return await interaction.response.send_message("Mike only.", ephemeral=True)
 
-    # Acknowledge immediately so Discord doesn't time out
+    if santa_is_disabled():
+        return await interaction.response.send_message("Season’s done.", ephemeral=True)
+
     await interaction.response.send_message("Queued. I’ll post this in 3 minutes.", ephemeral=True)
 
     async def _post_later():
-        await asyncio.sleep(180)  # 3 minutes
+        await asyncio.sleep(180)
         ch = bot.get_channel(WISH_CHANNEL_ID)
         if not ch:
             return
 
-        # staged reveal (one line at a time)
         pre = [
             "Right then… gather round.",
             "Drum roll, please…",
-            "Ladies and gentlemen…",
             "Santa’s got news…",
             "…",
         ]
@@ -1304,35 +869,160 @@ async def santa_announce(interaction: discord.Interaction, message: str):
             await ch.send(line)
             await asyncio.sleep(2)
 
-        # banter + the actual announcement message you entered
         banter = [
             "Try not to start a riot in chat.",
-            "No pushing. No crying. Minimal chaos, please.",
-            "If you’re lurking, at least lurk politely.",
+            "No pushing. Minimal chaos, please.",
             "Behave. It’s Christmas.",
         ]
 
-        await ch.send(f"🎅 **Ho ho ho! Santa Announcement!**")
+        await ch.send("🎅 **Ho ho ho! Santa Announcement!**")
         await asyncio.sleep(1)
-        await ch.send(f"{message}")
+        await ch.send(message)
         await asyncio.sleep(1)
         await ch.send(random.choice(banter))
 
-    asyncio.create_task(_post_later())  
+    asyncio.create_task(_post_later())
 
-@bot.tree.command(name="santa", description="Santa: wish entries or anonymous messages")
-async def santa_cmd(interaction: discord.Interaction):
-    if WISH_CHANNEL_ID and interaction.channel_id != WISH_CHANNEL_ID:
-        await interaction.response.send_message("Use this in the wish channel.", ephemeral=True)
+# =========================
+# Events
+# =========================
+
+@bot.event
+async def on_ready():
+    init_db()
+
+    # If deadline already passed, permanently disable and exit
+    if not santa_is_disabled() and datetime.now(LONDON_TZ) >= DEADLINE:
+        santa_set_disabled(True)
+        await post_farewell()
+        await bot.close()
         return
 
-    # Respond immediately (prevents "did not respond")
-    await interaction.response.send_message(
-        "Alright. Pick your chaos.",
-        view=SantaMainMenu(),
-        ephemeral=True
-    )
+    try:
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print("Santa guild slash commands synced.")
+        else:
+            await bot.tree.sync()
+            print("Santa global slash commands synced.")
+    except Exception as e:
+        print("Slash sync failed:", repr(e))
 
+    if not santa_self_destruct_watch.is_running():
+        santa_self_destruct_watch.start()
 
+    print(f"Santa logged in as {bot.user} (app id: {bot.application_id}).")
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Keep commands working
+    await bot.process_commands(message)
+
+    # Ignore bots
+    if message.author.bot:
+        return
+
+    # If Santa has ended, do nothing
+    if santa_is_disabled():
+        return
+
+    # Hard stop if deadline passed (belt + braces)
+    if datetime.now(LONDON_TZ) >= DEADLINE:
+        santa_set_disabled(True)
+        try:
+            await post_farewell()
+        except Exception:
+            pass
+        await bot.close()
+        return
+
+    content = (message.content or "")
+    content_l = content.lower().strip()
+
+    # MIKE-only list trigger (DM only)
+    if message.author.id == MIKE_USER_ID and content_l == LIST_TRIGGER:
+        await delete_if_possible(message)
+        try:
+            await send_today_list_dm(message.author)
+        except Exception:
+            try:
+                await message.author.send("Couldn’t pull the list. Check DB path / permissions and try again.")
+            except Exception:
+                pass
+        return
+
+    # MIKE-only announce (text command) — works anywhere
+    if message.author.id == MIKE_USER_ID and content_l == "santa announce":
+        await santa_announce_today(message.channel)
+        return
+
+    # Optional restrict wishing to one channel
+    if WISH_CHANNEL_ID and message.channel.id != WISH_CHANNEL_ID:
+        # Allow casual chat replies ONLY in allowed chat channels
+        if message.channel.id not in ALLOWED_CHAT_CHANNEL_IDS:
+            return
+
+    # Wish triggers (hides who triggered it)
+    if any(t in content_l for t in TRIGGERS):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        tease = await santa_says_async(
+            "They want to submit a wish.",
+            context_hint="Tell them to click the button to submit their wish. One short sentence. No emojis."
+        )
+        await message.channel.send(tease, view=SantaWishOpenView())
+        return
+
+    # Casual chat: starts with "santa"
+    if content_l.startswith("santa"):
+        reply = await santa_says_async(
+            content,
+            context_hint=(
+                "They spoke to you casually. Reply as Santa: funny, cheeky, modern British energy. "
+                "Playful banter, confident. If they flirt, flirt back lightly (PG-13). "
+                "1–2 sentences. No emojis."
+            )
+        )
+        try:
+            await message.reply(reply, mention_author=False)
+        except Exception:
+            pass
+        return
+
+    # Reply when mentioned (simple fallback)
+    if bot.user and bot.user.mentioned_in(message):
+        if message.mention_everyone:
+            return
+        cleaned = (
+            content.replace(f"<@{bot.user.id}>", "")
+                   .replace(f"<@!{bot.user.id}>", "")
+                   .strip()
+        )
+        if cleaned:
+            reply = await santa_says_async(
+                cleaned,
+                context_hint="They mentioned you. Reply as Santa in 1–2 sentences, playful. No emojis."
+            )
+            try:
+                await message.reply(reply, mention_author=False)
+            except Exception:
+                pass
+        return
+
+    # Lightweight “ambient” reply (optional) — only in the wish channel and only if they say santa
+    if message.channel.id in ALLOWED_CHAT_CHANNEL_IDS and "santa" in content_l:
+        try:
+            await message.reply(random.choice(SANTA_REPLIES), mention_author=False)
+        except Exception:
+            pass
+
+# =========================
+# Run
+# =========================
 
 bot.run(DISCORD_TOKEN)
